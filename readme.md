@@ -1,6 +1,12 @@
 # Image Editing Using Diffusion by Various Method
 This project is useful for the person who want to edit images using diffusion model by "Null-text-inversion, Negative-prompt-inversion, Directinversion" combined with "Prompt-to-Prompt, Masactrl, Pix2Pix Zero, PnP".    
 
+## To-Do
+- [x] Complete Prompt-to-Prompt
+- [x] Complete MasaCtrl
+- [ ] Complete Pix2Pix Zero
+- [x] Complete PnP  
+
 ## 🌱 Environment Setting
 **For Prompt-to-Prompt**
 ```bash
