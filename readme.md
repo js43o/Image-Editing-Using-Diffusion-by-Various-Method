@@ -52,6 +52,7 @@ conda run -n p2p python -u main.py --data_path img \
                 --output_path output \
                 --edit_method_list directinversion+p2p
 ```
+And Finally, You can find the result in **output** directory.
 
 ## Acknowledgement
 This code has been modified based on the [PnP_Inversion](https://github.com/cure-lab/PnPInversion/tree/main).    
