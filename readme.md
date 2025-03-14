@@ -37,7 +37,8 @@ You can obtain images by combining below:
 | null-text-inversion | p2p |
 | negative-prompt-inversion | masactrl |
 | directinversion | pix2pix_zero |
-| ddim | pnp |
+| ddim | pnp |    
+
 (You can observe the results obtained without the image preservation technique by using "ddim".)
 
 Since the Conda environment depends on the specific editing method, please make sure to execute commands using:
