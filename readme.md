@@ -30,19 +30,15 @@ editing_instruction = "" #You can write the instruction on it
 blended_word = [] #Ex. ["horse", "dog"] if you want to change word "horse" in source prompt to word "dog" in target prompt
 ```
 ### How to run to get result  
-You can obtain images by combining elements from the two lists:    
-**🚀 For maintaining source image**
-- null-text-inversion
-- negative-prompt-inversion
-- directinversion    
-- ddim    
+You can obtain images by combining below:    
+
+| Preserving source Image | Editing image by target prompt|
+| :- | :- |
+| null-text-inversion | p2p |
+| negative-prompt-inversion | masactrl |
+| directinversion | pix2pix_zero |
+| ddim | pnp |
 (You can observe the results obtained without the image preservation technique by using "ddim".)
- 
-**🚀 For editing image by target prompt**
-- p2p
-- masactrl
-- pix2pix_zero
-- pnp
 
 Since the Conda environment depends on the specific editing method, please make sure to execute commands using:
 
