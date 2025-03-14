@@ -1,7 +1,7 @@
 # Image Editing Using Diffusion by Various Method
 This project is useful for the person who want to edit images using diffusion model by "Null-text-inversion, Negative-prompt-inversion, Directinversion" combined with "Prompt-to-Prompt, Masactrl, Pix2Pix Zero, PnP".    
 
-## Environment Setting
+## 🌱 Environment Setting
 **For Prompt-to-Prompt**
 ```bash
 conda env create --file env/p2p.yaml
@@ -19,8 +19,8 @@ conda env create --file env/pix2pix_zero.yaml
 conda env create --file env/pnp.yaml
 ```
 
-## Run
-### How to write prompt
+## 🚀 Run
+### 📝 How to write prompt
 In **main.py**
 ```python
 original_prompt = "A white horse running in the field"
@@ -29,10 +29,10 @@ image_path = "./img/horse.png"
 editing_instruction = "" #You can write the instruction on it
 blended_word = [] #Ex. ["horse", "dog"] if you want to change word "horse" in source prompt to word "dog" in target prompt
 ```
-### How to run to get result  
+### 🎯 How to run to get result  
 You can obtain images by combining below:    
 
-| Preserving source Image | Editing image by target prompt|
+| 🔒 Preserving source Image | 🎨 Editing image by target prompt|
 | :- | :- |
 | null-text-inversion | p2p |
 | negative-prompt-inversion | masactrl |
