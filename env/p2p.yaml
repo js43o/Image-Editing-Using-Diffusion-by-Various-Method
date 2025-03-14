@@ -1,4 +1,4 @@
-name: stable_diff
+name: p2p
 channels:
   - pytorch
   - nvidia

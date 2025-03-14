@@ -63,7 +63,7 @@ if __name__ == "__main__":
         
     original_prompt = "A white horse running in the field"#item["original_prompt"].replace("[", "").replace("]", "")
     editing_prompt = "Water color of a white horse running in the field"#item["editing_prompt"].replace("[", "").replace("]", "")
-    image_path = "/shared/home/vclp/hyunwook/junhyung/repo/img/horse.png"#os.path.join(f"{data_path}/annotation_images", item["image_path"])
+    image_path = "./img/horse.png"#os.path.join(f"{data_path}/annotation_images", item["image_path"])
     editing_instruction = ""#item["editing_instruction"]
     blended_word = []#item["blended_word"].split(" ") if item["blended_word"] != "" else []
     # mask = Image.fromarray(np.uint8(mask_decode(item["mask"])[:,:,np.newaxis].repeat(3,2))).convert("L")
