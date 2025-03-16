@@ -4,7 +4,7 @@ This project is useful for the person who want to edit images using diffusion mo
 ## To-Do
 - [x] Complete Prompt-to-Prompt
 - [x] Complete MasaCtrl
-- [ ] Complete Pix2Pix Zero
+- [x] Complete Pix2Pix Zero
 - [x] Complete PnP  
 
 ## 🌱 Environment Setting
