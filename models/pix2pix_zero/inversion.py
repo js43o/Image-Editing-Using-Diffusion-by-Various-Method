@@ -14,6 +14,7 @@ from .attention_control import register_attention_control
 import torch.nn.functional as nnf
 from torch.optim.adam import Adam
 from utils.utils import slerp_tensor, image2latent, latent2image
+from tqdm import tqdm
 
 
 if torch.cuda.is_available():
@@ -216,7 +217,7 @@ class NullInversion:
         uncond_embeddings, cond_embeddings = self.context.chunk(2)
         all_latent = [latent]
         latent = latent.clone().detach()
-        for i in range(self.num_ddim_steps):
+        for i in tqdm(range(self.num_ddim_steps), desc="DDIM Inversion ..."):
             t = self.model.scheduler.timesteps[len(self.model.scheduler.timesteps) - i - 1]
             noise_pred = self.get_noise_pred_single(latent, t, cond_embeddings)
             latent = self.next_step(noise_pred, t, latent)
@@ -238,7 +239,7 @@ class NullInversion:
         uncond_embeddings, cond_embeddings = self.context.chunk(2)
         uncond_embeddings_list = []
         latent_cur = latents[-1]
-        for i in range(self.num_ddim_steps):
+        for i in tqdm(range(self.num_ddim_steps), desc="Null Optimization ..."):
             uncond_embeddings = uncond_embeddings.clone().detach()
             t = self.model.scheduler.timesteps[i]
             if num_inner_steps!=0:

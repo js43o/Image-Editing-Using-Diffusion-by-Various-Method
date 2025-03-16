@@ -65,7 +65,7 @@ class EditingPipeline(BasePipeline):
         do_classifier_free_guidance = guidance_scale > 1.0
         x_in = x_in.to(dtype=self.unet.dtype, device=self._execution_device)
         # 3. Encode input prompt = 2x77x1024
-        prompt_embeds = self._encode_prompt( prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt, prompt_embeds=prompt_embeds, negative_prompt_embeds=None,)
+        prompt_embeds = self._encode_prompt( prompt, device, num_images_per_prompt, do_classifier_free_guidance, negative_prompt, prompt_embeds=prompt_embeds, negative_prompt_embeds=negative_prompt_embeds,)
         # print("negative_prompt_embeds",negative_prompt_embeds[0].shape)
         # print("prompt_embeds",prompt_embeds.shape)
         # 4. Prepare timesteps
@@ -103,7 +103,7 @@ class EditingPipeline(BasePipeline):
                     d_ref_t2attn[t.item()] = {}
                     for name, module in self.unet.named_modules():
                         module_name = type(module).__name__
-                        if module_name == "Attention" and 'attn2' in name:
+                        if module_name == "CrossAttention" and 'attn2' in name:
                             attn_mask = module.attn_probs # size is num_channel,s*s,77
                             d_ref_t2attn[t.item()][name] = attn_mask.detach().cpu()
 
@@ -114,8 +114,8 @@ class EditingPipeline(BasePipeline):
 
                     # compute the previous noisy sample x_t -> x_t-1
                     latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-                    if latent_list is not None :
-                        noise_loss_list.append(latent_list[-1-i]-latents)
+                    if latent_list is not None:
+                        noise_loss_list.append(latent_list[-2-i]-latents)
                         latents=latents+noise_loss_list[-1]
 
                     # call the callback, if provided
@@ -154,10 +154,10 @@ class EditingPipeline(BasePipeline):
                 else:
                     noise_pred = self.unet(x_in,t,encoder_hidden_states=prompt_embeds_edit.detach(),cross_attention_kwargs=cross_attention_kwargs,).sample
 
-                loss = torch.tensor(0.0, requires_grad=True)
+                loss = torch.tensor(0.0, device=self.device, requires_grad=True)
                 for name, module in self.unet.named_modules():
                     module_name = type(module).__name__
-                    if module_name == "Attention" and 'attn2' in name:
+                    if module_name == "CrossAttention" and 'attn2' in name:
                         # print("I'm here!")
                         curr = module.attn_probs # size is num_channel,s*s,77
                         ref = d_ref_t2attn[t.item()][name].detach().to(device)

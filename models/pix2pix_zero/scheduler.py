@@ -228,7 +228,6 @@ class DDIMInverseScheduler(SchedulerMixin, ConfigMixin):
         # print(timestep, prev_timestep)
         a_t = alpha_prod_t = self.alphas_cumprod[timestep-1]
         # a_prev = alpha_t_prev = self.alphas_cumprod[prev_timestep-1] if prev_timestep >= 0 else self.final_alpha_cumprod
-        # noted: we edit the code here to solve the problem of zero-shot can only do 48 steps of inversion
         if prev_timestep <= self.config.num_train_timesteps:
             a_prev = alpha_t_prev = self.alphas_cumprod[prev_timestep-1]
         else:

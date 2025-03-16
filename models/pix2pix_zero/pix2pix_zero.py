@@ -13,7 +13,7 @@ from models.pix2pix_zero.edit_directions import construct_direction
 from models.pix2pix_zero.edit_pipeline import EditingPipeline
 from diffusers import StableDiffusionPipeline
 from models.p2p.scheduler_dev import DDIMSchedulerDev
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionPipeline, DDIMScheduler
 from utils.utils import txt_draw, load_512
 
 from diffusers import DDIMScheduler
@@ -40,24 +40,13 @@ class Pix2PixZeroEditor:
         # make the DDIM inversion pipeline
         self.pipe = DDIMInversion.from_pretrained('CompVis/stable-diffusion-v1-4').to(device)
         self.pipe.scheduler = DDIMInverseScheduler.from_config(self.pipe.scheduler.config)
-        self.pipe.scheduler.num_inference_steps=num_ddim_steps
 
         self.edit_pipe = EditingPipeline.from_pretrained('CompVis/stable-diffusion-v1-4').to(device)
-        # self.edit_pipe.scheduler = DDIMScheduler.from_config(self.edit_pipe.scheduler.config)
-        self.edit_pipe.scheduler = DDIMSchedulerDev(beta_start=0.00085,
-                                    beta_end=0.012,
-                                    beta_schedule="scaled_linear",
-                                    clip_sample=False,
-                                    set_alpha_to_one=False)
-        self.edit_pipe.scheduler.num_inference_steps=num_ddim_steps
+        self.edit_pipe.scheduler = DDIMScheduler.from_config(self.edit_pipe.scheduler.config)
 
         # for null text inversion
         self.ldm_stable = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4").to(device)
-        self.ldm_stable.scheduler = DDIMSchedulerDev(beta_start=0.00085,
-                                    beta_end=0.012,
-                                    beta_schedule="scaled_linear",
-                                    clip_sample=False,
-                                    set_alpha_to_one=False)
+        self.ldm_stable.scheduler = DDIMScheduler.from_config(self.ldm_stable.scheduler.config)
         self.ldm_stable.scheduler.set_timesteps(self.num_ddim_steps)
         
     def __call__(self, edit_method, image_path, prompt_src, prompt_tar, guidance_scale=7.5, image_size=[512,512]):
@@ -95,7 +84,7 @@ class Pix2PixZeroEditor:
                     prompt_tar,
                     guidance_scale=7.5,
                     image_size=[512,512]):
-        image_gt = Image.open(image_path).resize(image_size)
+        image_gt = Image.open(image_path).resize(image_size, Image.Resampling.LANCZOS)
         if image_gt.mode == 'RGBA':
             image_gt = image_gt.convert('RGB')
         # generate the caption
@@ -112,13 +101,13 @@ class Pix2PixZeroEditor:
         mean_emb_src = self.load_sentence_embeddings([prompt_src], self.edit_pipe.tokenizer, self.edit_pipe.text_encoder)
         mean_emb_tar = self.load_sentence_embeddings([prompt_tar], self.edit_pipe.tokenizer, self.edit_pipe.text_encoder)
         
-        rec_pil, edit_pil = self.edit_pipe(prompt_str,
+        rec_pil, edit_pil = self.edit_pipe(prompt_src,
                     num_inference_steps=self.num_ddim_steps,
                     x_in=inversion_latent,
                     edit_dir=(mean_emb_tar.mean(0)-mean_emb_src.mean(0)).unsqueeze(0),
                     guidance_amount=self.xa_guidance,
                     guidance_scale=guidance_scale,
-                    negative_prompt=prompt_str # use the unedited prompt for the negative prompt
+                    negative_prompt=None # use the unedited prompt for the negative prompt
             )
         
         image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
@@ -151,13 +140,13 @@ class Pix2PixZeroEditor:
         mean_emb_src = self.load_sentence_embeddings([prompt_src], self.edit_pipe.tokenizer, self.edit_pipe.text_encoder)
         mean_emb_tar = self.load_sentence_embeddings([prompt_tar], self.edit_pipe.tokenizer, self.edit_pipe.text_encoder)
         
-        rec_pil, edit_pil = self.edit_pipe(prompt_str,
+        rec_pil, edit_pil = self.edit_pipe(prompt_src,
                     num_inference_steps=self.num_ddim_steps,
                     x_in=inversion_latent,
                     edit_dir=(mean_emb_tar.mean(0)-mean_emb_src.mean(0)).unsqueeze(0),
                     guidance_amount=self.xa_guidance,
                     guidance_scale=guidance_scale,
-                    negative_prompt=prompt_str, # use the unedited prompt for the negative prompt
+                    negative_prompt=None, # use the unedited prompt for the negative prompt
                     latent_list=latent_list
             )
         
@@ -173,29 +162,28 @@ class Pix2PixZeroEditor:
                     prompt_tar,
                     guidance_scale=7.5,
                     image_size=[512,512]):
-        image_gt = Image.open(image_path).resize(image_size)
+        image_gt = Image.open(image_path).resize(image_size, Image.Resampling.LANCZOS)
         if image_gt.mode == 'RGBA':
             image_gt = image_gt.convert('RGB')
         image_gt_ = np.array(image_gt)
         # generate the caption
-        prompt_str = self.model_blip.generate({"image": self.vis_processors["eval"](image_gt).unsqueeze(0).to(self.device)})[0]
+        # prompt_str = self.model_blip.generate({"image": self.vis_processors["eval"](image_gt).unsqueeze(0).to(self.device)})[0]
         null_inversion = NullInversion(model=self.ldm_stable,
                                     num_ddim_steps=self.num_ddim_steps)
         
         _, _, x_stars, uncond_embeddings = null_inversion.invert(
-            image_gt=image_gt_, prompt=prompt_str,guidance_scale=guidance_scale)
+            image_gt=image_gt_, prompt=prompt_src,guidance_scale=guidance_scale)
         x_t = x_stars[-1]
 
         mean_emb_src = self.load_sentence_embeddings([prompt_src], self.edit_pipe.tokenizer, self.edit_pipe.text_encoder)
         mean_emb_tar = self.load_sentence_embeddings([prompt_tar], self.edit_pipe.tokenizer, self.edit_pipe.text_encoder)
         
-        rec_pil, edit_pil = self.edit_pipe(prompt_str,
+        rec_pil, edit_pil = self.edit_pipe(prompt_src,
                     num_inference_steps=self.num_ddim_steps,
                     x_in=x_t,
                     edit_dir=(mean_emb_tar.mean(0)-mean_emb_src.mean(0)).unsqueeze(0),
                     guidance_amount=self.xa_guidance,
                     guidance_scale=guidance_scale,
-                    negative_prompt=prompt_str, # use the unedited prompt for the negative prompt
                     negative_prompt_embeds=uncond_embeddings
             )
         
@@ -210,30 +198,29 @@ class Pix2PixZeroEditor:
                     prompt_tar,
                     guidance_scale=7.5,
                     image_size=[512,512]):
-        image_gt = Image.open(image_path).resize(image_size)
+        image_gt = Image.open(image_path).resize(image_size, Image.Resampling.LANCZOS)
         if image_gt.mode == 'RGBA':
             image_gt = image_gt.convert('RGB')
         image_gt_ = np.array(image_gt)
         # generate the caption
-        prompt_str = self.model_blip.generate({"image": self.vis_processors["eval"](image_gt).unsqueeze(0).to(self.device)})[0]
+        # prompt_str = self.model_blip.generate({"image": self.vis_processors["eval"](image_gt).unsqueeze(0).to(self.device)})[0]
         negative_inversion = NegativePromptInversion(model=self.ldm_stable,
                                     num_ddim_steps=self.num_ddim_steps)
         
         _, image_enc_latent, x_stars, uncond_embeddings = negative_inversion.invert(
-            image_gt=image_gt_, prompt=prompt_str, npi_interp=0)
+            image_gt=image_gt_, prompt=prompt_src, npi_interp=0)
         x_t = x_stars[-1]
 
         mean_emb_src = self.load_sentence_embeddings([prompt_src], self.edit_pipe.tokenizer, self.edit_pipe.text_encoder)
         mean_emb_tar = self.load_sentence_embeddings([prompt_tar], self.edit_pipe.tokenizer, self.edit_pipe.text_encoder)
         
-        rec_pil, edit_pil = self.edit_pipe(prompt_str,
+        rec_pil, edit_pil = self.edit_pipe(prompt_src,
                     num_inference_steps=self.num_ddim_steps,
                     x_in=x_t,
                     edit_dir=(mean_emb_tar.mean(0)-mean_emb_src.mean(0)).unsqueeze(0),
                     guidance_amount=self.xa_guidance,
                     guidance_scale=guidance_scale,
-                    negative_prompt=prompt_str, # use the unedited prompt for the negative prompt
-                    negative_prompt_embeds=uncond_embeddings
+                    negative_prompt=prompt_src, # use the unedited prompt for the negative prompt
             )
         
         image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
