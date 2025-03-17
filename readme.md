@@ -47,11 +47,12 @@ You can obtain images by combining below:
 
 (You can observe the results obtained without the image preservation technique by using "ddim".)
 
-Since the Conda environment depends on the specific editing method, please make sure to execute commands using:
+Since the Conda environment depends on the specific editing method, you must use appropriate environment for each editing method.
 
-Please refer to **run.sh**  
+please make sure to execute commands using:
+refer to **run.sh**  
 ```bash
-conda run -n p2p python -u main.py --data_path img \
+conda run -n p2p --no-capture-output python -u main.py --data_path img \
                 --output_path output \
                 --edit_method_list directinversion+p2p
 ```
