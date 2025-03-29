@@ -8,10 +8,10 @@ import numpy as np
 from tqdm import tqdm
 from PIL import Image
 
-from diffusers import StableDiffusionPipeline
+from diffusers import StableDiffusionXLPipeline
 
 
-class MasaCtrlPipeline(StableDiffusionPipeline):
+class MasaCtrlPipeline(StableDiffusionXLPipeline):
 
     def next_step(
         self,
@@ -84,12 +84,12 @@ class MasaCtrlPipeline(StableDiffusionPipeline):
             image = image.permute(2, 0, 1).unsqueeze(0).to(DEVICE)
         # input image density range [-1, 1]
         latents = self.vae.encode(image)["latent_dist"].mean
-        latents = latents * 0.18215
+        latents = latents * 0.13025
         return latents
 
     @torch.no_grad()
     def latent2image(self, latents, return_type="np"):
-        latents = 1 / 0.18215 * latents.detach()
+        latents = 1 / 0.13025 * latents.detach()
         image = self.vae.decode(latents)["sample"]
         if return_type == "np":
             image = (image / 2 + 0.5).clamp(0, 1)
@@ -101,7 +101,7 @@ class MasaCtrlPipeline(StableDiffusionPipeline):
         return image
 
     def latent2image_grad(self, latents):
-        latents = 1 / 0.18215 * latents
+        latents = 1 / 0.13025 * latents
         image = self.vae.decode(latents)["sample"]
 
         return image  # range [-1, 1]

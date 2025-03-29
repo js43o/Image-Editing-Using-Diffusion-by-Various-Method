@@ -629,10 +629,10 @@ class MasaCtrlEditor:
             set_alpha_to_one=False,
         )
         self.model = MasaCtrlPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4", scheduler=self.scheduler1
+            "stabilityai/stable-diffusion-xl-base-1.0", scheduler=self.scheduler1
         ).to(device)
         self.neg_model = MasaCtrlPipeline.from_pretrained(
-            "CompVis/stable-diffusion-v1-4", scheduler=self.scheduler2
+            "stabilityai/stable-diffusion-xl-base-1.0", scheduler=self.scheduler2
         ).to(device)
         self.model.scheduler.set_timesteps(self.num_ddim_steps)
         self.neg_model.scheduler.set_timesteps(self.num_ddim_steps)
