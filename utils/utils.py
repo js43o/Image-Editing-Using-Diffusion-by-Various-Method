@@ -78,7 +78,7 @@ def init_latent(latent, model, height, width, generator, batch_size):
 
 @torch.no_grad()
 def latent2image(model, latents, return_type="np"):
-    latents = 1 / 0.18215 * latents.detach()
+    latents = 1 / 0.13025 * latents.detach()
     image = model.decode(latents)["sample"]
     if return_type == "np":
         image = (image / 2 + 0.5).clamp(0, 1)
@@ -98,7 +98,7 @@ def image2latent(model, image):
             image = torch.from_numpy(image).float() / 127.5 - 1
             image = image.permute(2, 0, 1).unsqueeze(0).to(model.device)
             latents = model.encode(image)["latent_dist"].mean
-            latents = latents * 0.18215
+            latents = latents * 0.13025
     return latents
 
 
