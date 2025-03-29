@@ -9,6 +9,7 @@ from tqdm import tqdm
 from PIL import Image
 
 from diffusers import StableDiffusionXLPipeline
+from compel import Compel, ReturnedEmbeddingsType
 
 
 class MasaCtrlPipeline(StableDiffusionXLPipeline):
@@ -133,88 +134,81 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
             if batch_size > 1:
                 prompt = [prompt] * batch_size
 
-        # text embeddings
-        text_input = self.tokenizer(
-            prompt, padding="max_length", max_length=77, return_tensors="pt"
+        # prompt embedding
+        compel = Compel(
+            tokenizer=[self.tokenizer, self.tokenizer_2],
+            text_encoder=[self.text_encoder, self.text_encoder_2],
+            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+            requires_pooled=[False, True],
         )
 
-        text_embeddings = self.text_encoder(text_input.input_ids.to(DEVICE))[0]
-        print("input text embeddings :", text_embeddings.shape)
-        if kwds.get("dir"):
-            dir = text_embeddings[-2] - text_embeddings[-1]
-            u, s, v = torch.pca_lowrank(dir.transpose(-1, -2), q=1, center=True)
-            text_embeddings[-1] = text_embeddings[-1] + kwds.get("dir") * v
-            print(u.shape)
-            print(v.shape)
+        prompt_embeds, pooled_prompt_embeds = compel(prompt)
+        negative_prompt_embeds, negative_pooled_prompt_embeds = compel(
+            [""] * len(prompt)
+        )
 
-        # define initial latents
-        latents_shape = (batch_size, self.unet.in_channels, height // 8, width // 8)
-        if latents is None:
-            latents = torch.randn(latents_shape, device=DEVICE)
-        else:
-            assert (
-                latents.shape == latents_shape
-            ), f"The shape of input latent tensor {latents.shape} should equal to predefined one."
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.default_sample_size = self.unet.config.sample_size
 
-        # unconditional embedding for classifier free guidance
-        if guidance_scale > 1.0:
-            max_length = text_input.input_ids.shape[-1]
-            if neg_prompt:
-                uc_text = neg_prompt
-            else:
-                uc_text = ""
-            # uc_text = "ugly, tiling, poorly drawn hands, poorly drawn feet, body out of frame, cut off, low contrast, underexposed, distorted face"
-            unconditional_input = self.tokenizer(
-                [uc_text] * batch_size,
-                padding="max_length",
-                max_length=77,
-                return_tensors="pt",
-            )
-            # unconditional_input.input_ids = unconditional_input.input_ids[:, 1:]
-            unconditional_embeddings = self.text_encoder(
-                unconditional_input.input_ids.to(DEVICE)
-            )[0]
-            text_embeddings = torch.cat(
-                [unconditional_embeddings, text_embeddings], dim=0
+        height = self.default_sample_size * self.vae_scale_factor
+        width = self.default_sample_size * self.vae_scale_factor
+
+        original_size = (height, width)
+        target_size = (height, width)
+        crops_coords_top_left = (0, 0)
+        add_time_ids = list(original_size + crops_coords_top_left + target_size)
+
+        passed_add_embed_dim = (
+            self.unet.config.addition_time_embed_dim * len(add_time_ids)
+            + self.text_encoder_2.config.projection_dim
+        )
+        expected_add_embed_dim = self.unet.add_embedding.linear_1.in_features
+
+        if expected_add_embed_dim != passed_add_embed_dim:
+            raise ValueError(
+                f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
             )
 
-        print("latents shape: ", latents.shape)
+        add_time_ids = torch.tensor([add_time_ids], dtype=self.unet.dtype).to(DEVICE)
+        batch_size = prompt_embeds.shape[0]
+        add_time_ids = add_time_ids.repeat(batch_size, 1)
+        add_time_ids = torch.cat([add_time_ids, add_time_ids])
+
+        context = torch.cat([negative_prompt_embeds, prompt_embeds])
+        context_p = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds])
+
         # iterative sampling
         self.scheduler.set_timesteps(num_inference_steps)
-        # print("Valid timesteps: ", reversed(self.scheduler.timesteps))
+
         latents_list = [latents]
         pred_x0_list = [latents]
         for i, t in enumerate(tqdm(self.scheduler.timesteps, desc="DDIM Sampler")):
-            if ref_intermediate_latents is not None:
-                # note that the batch_size >= 2
-                latents_ref = ref_intermediate_latents[-1 - i]
-                _, latents_cur = latents.chunk(2)
-                latents = torch.cat([latents_ref, latents_cur])
+            model_inputs = torch.cat([latents] * 2)
 
-            if guidance_scale > 1.0:
-                model_inputs = torch.cat([latents] * 2)
-            else:
-                model_inputs = latents
-            if unconditioning is not None and isinstance(unconditioning, list):
-                _, text_embeddings = text_embeddings.chunk(2)
-                text_embeddings = torch.cat(
-                    [unconditioning[i].expand(*text_embeddings.shape), text_embeddings]
-                )
             # predict the noise
+            added_cond_kwargs = {
+                "text_embeds": context_p,
+                "time_ids": add_time_ids,
+            }
             noise_pred = self.unet(
-                model_inputs, t, encoder_hidden_states=text_embeddings
+                model_inputs,
+                t,
+                encoder_hidden_states=context,
+                added_cond_kwargs=added_cond_kwargs,
             ).sample
-            if guidance_scale > 1.0:
-                noise_pred_uncon, noise_pred_con = noise_pred.chunk(2, dim=0)
-                noise_pred = noise_pred_uncon + guidance_scale * (
-                    noise_pred_con - noise_pred_uncon
-                )
+
+            noise_pred_uncon, noise_pred_con = noise_pred.chunk(2, dim=0)
+            noise_pred = noise_pred_uncon + guidance_scale * (
+                noise_pred_con - noise_pred_uncon
+            )
+
             # compute the previous noise sample x_t -> x_t-1
             latents, pred_x0 = self.step(noise_pred, t, latents)
             if noise_loss_list is not None:
                 latents = torch.concat(
                     (latents[:1] + noise_loss_list[i][:1], latents[1:])
                 )
+
             latents_list.append(latents)
             pred_x0_list.append(pred_x0)
 
@@ -227,6 +221,7 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
                 self.latent2image(img, return_type="pt") for img in latents_list
             ]
             return image, pred_x0_list, latents_list
+
         return image
 
     @torch.no_grad()
@@ -241,12 +236,16 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
         **kwds,
     ):
         """
-        invert a real image into noise map with determinisc DDIM inversion
+        invert a real image into noise map with deterministic DDIM inversion
         """
+        print("✅ invert()", prompt)
+        batch_size = image.shape[0]
+        print("📦 batch_size =", batch_size)
+
         DEVICE = (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
-        batch_size = image.shape[0]
+
         if isinstance(prompt, list):
             if batch_size == 1:
                 image = image.expand(len(prompt), -1, -1, -1)
@@ -254,57 +253,81 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
             if batch_size > 1:
                 prompt = [prompt] * batch_size
 
-        # text embeddings
-        text_input = self.tokenizer(
-            prompt, padding="max_length", max_length=77, return_tensors="pt"
+        # prompt embedding
+        compel = Compel(
+            tokenizer=[self.tokenizer, self.tokenizer_2],
+            text_encoder=[self.text_encoder, self.text_encoder_2],
+            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+            requires_pooled=[False, True],
         )
-        text_embeddings = self.text_encoder(text_input.input_ids.to(DEVICE))[0]
-        print("input text embeddings :", text_embeddings.shape)
+
+        prompt_embeds, pooled_prompt_embeds = compel(prompt)
+        negative_prompt_embeds, negative_pooled_prompt_embeds = compel("")
+
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.default_sample_size = self.unet.config.sample_size
+
+        height = self.default_sample_size * self.vae_scale_factor
+        width = self.default_sample_size * self.vae_scale_factor
+
+        original_size = (height, width)
+        target_size = (height, width)
+        crops_coords_top_left = (0, 0)
+        add_time_ids = list(original_size + crops_coords_top_left + target_size)
+
+        passed_add_embed_dim = (
+            self.unet.config.addition_time_embed_dim * len(add_time_ids)
+            + self.text_encoder_2.config.projection_dim
+        )
+        expected_add_embed_dim = self.unet.add_embedding.linear_1.in_features
+
+        if expected_add_embed_dim != passed_add_embed_dim:
+            raise ValueError(
+                f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
+            )
+
+        add_time_ids = torch.tensor([add_time_ids], dtype=self.unet.dtype).to(DEVICE)
+        batch_size = prompt_embeds.shape[0]
+        add_time_ids = add_time_ids.repeat(batch_size, 1)
+        add_time_ids = torch.cat([add_time_ids, add_time_ids])
+
+        context = torch.cat([negative_prompt_embeds, prompt_embeds])
+        context_p = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds])
+
         # define initial latents
         latents = self.image2latent(image)
         start_latents = latents
-        # print(latents)
-        # exit()
-        # unconditional embedding for classifier free guidance
-        if guidance_scale > 1.0:
-            max_length = text_input.input_ids.shape[-1]
-            unconditional_input = self.tokenizer(
-                [""] * batch_size,
-                padding="max_length",
-                max_length=77,
-                return_tensors="pt",
-            )
-            unconditional_embeddings = self.text_encoder(
-                unconditional_input.input_ids.to(DEVICE)
-            )[0]
-            text_embeddings = torch.cat(
-                [unconditional_embeddings, text_embeddings], dim=0
-            )
 
-        print("latents shape: ", latents.shape)
+        print("📦 latents =", latents.shape)
+
         # interative sampling
         self.scheduler.set_timesteps(num_inference_steps)
         print("Valid timesteps: ", reversed(self.scheduler.timesteps))
-        # print("attributes: ", self.scheduler.__dict__)
+
         latents_list = [latents]
         pred_x0_list = [latents]
         for i, t in enumerate(
             tqdm(reversed(self.scheduler.timesteps), desc="DDIM Inversion")
         ):
-            if guidance_scale > 1.0:
-                model_inputs = torch.cat([latents] * 2)
-            else:
-                model_inputs = latents
+            model_inputs = torch.cat([latents] * 2)
 
             # predict the noise
+            added_cond_kwargs = {
+                "text_embeds": context_p,
+                "time_ids": add_time_ids,
+            }
             noise_pred = self.unet(
-                model_inputs, t, encoder_hidden_states=text_embeddings
+                model_inputs,
+                t,
+                encoder_hidden_states=context,
+                added_cond_kwargs=added_cond_kwargs,
             ).sample
-            if guidance_scale > 1.0:
-                noise_pred_uncon, noise_pred_con = noise_pred.chunk(2, dim=0)
-                noise_pred = noise_pred_uncon + guidance_scale * (
-                    noise_pred_con - noise_pred_uncon
-                )
+
+            noise_pred_uncon, noise_pred_con = noise_pred.chunk(2, dim=0)
+            noise_pred = noise_pred_uncon + guidance_scale * (
+                noise_pred_con - noise_pred_uncon
+            )
+
             # compute the previous noise sample x_t-1 -> x_t
             latents, pred_x0 = self.next_step(noise_pred, t, latents)
             latents_list.append(latents)
@@ -314,4 +337,5 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
             # return the intermediate laters during inversion
             # pred_x0_list = [self.latent2image(img, return_type="pt") for img in pred_x0_list]
             return latents, latents_list
+
         return latents, start_latents
