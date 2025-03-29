@@ -1,5 +1,5 @@
 from models.p2p.scheduler_dev import DDIMSchedulerDev
-from models.p2p.inversion import DirectInversion
+from models.p2p.inversion import DirectInversion, NullInversion
 from models.p2p.attention_control import AttentionStore, make_controller
 from models.p2p.p2p_guidance_forward import (
     p2p_guidance_forward,

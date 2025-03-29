@@ -5,6 +5,7 @@ import json
 from PIL import Image
 import torch
 import random
+import gc
 
 
 def mask_decode(encoded_mask, image_shape=[512, 512]):
@@ -57,8 +58,8 @@ if __name__ == "__main__":
         nargs="+",
         type=str,
         default=[
-            "null-text-inversion+masactrl",
             "directinversion+masactrl",
+            "null-text-inversion+masactrl",
             "ddim+masactrl",
         ],
     )  # the editing methods that needed to run
@@ -81,17 +82,13 @@ if __name__ == "__main__":
     #     if item["editing_type_id"] not in edit_category_list:
     #         continue
 
-    original_prompt = (
-        "A smiling girl"  # item["original_prompt"].replace("[", "").replace("]", "")
-    )
-    editing_prompt = (
-        "A angry girl"  # item["editing_prompt"].replace("[", "").replace("]", "")
-    )
-    image_path = "./img/girl.png"  # os.path.join(f"{data_path}/annotation_images", item["image_path"])
+    original_prompt = "A stone on the sand"  # item["original_prompt"].replace("[", "").replace("]", "")
+    editing_prompt = "A sharp stone on the sand"  # item["editing_prompt"].replace("[", "").replace("]", "")
+    image_path = "./img/stone.png"  # os.path.join(f"{data_path}/annotation_images", item["image_path"])
     editing_instruction = ""  # item["editing_instruction"]
     blended_word = [
-        "smiling",
-        "angry",
+        "stone",
+        "sharp stone",
     ]  # item["blended_word"].split(" ") if item["blended_word"] != "" else []
     # mask = Image.fromarray(np.uint8(mask_decode(item["mask"])[:,:,np.newaxis].repeat(3,2))).convert("L")
     mask = Image.fromarray(
@@ -109,7 +106,6 @@ if __name__ == "__main__":
         if (not os.path.exists(present_image_save_path)) or rerun_exist_images:
             print(f"editing image [{image_path}] with [{edit_method}]")
             setup_seed()
-            torch.cuda.empty_cache()
 
             print(edit_method)
             if edit_method.split("+")[-1] == "p2p":
@@ -130,7 +126,7 @@ if __name__ == "__main__":
                     prompt_src=original_prompt,
                     prompt_tar=editing_prompt,
                     guidance_scale=7.5,
-                    cross_replace_steps=0.4,
+                    cross_replace_steps=0.6,
                     self_replace_steps=0.6,
                     blend_word=(
                         (((blended_word[0],), (blended_word[1],)))
@@ -213,3 +209,6 @@ if __name__ == "__main__":
 
         else:
             print(f"skip image [{image_path}] with [{edit_method}]")
+
+        torch.cuda.empty_cache()
+        gc.collect()
