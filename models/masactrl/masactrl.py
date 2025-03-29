@@ -9,9 +9,7 @@ from einops import rearrange
 
 from diffusers import DDIMScheduler
 
-from models.p2p.inversion import (
-    DirectInversion,
-)  # , NullInversion, NegativePromptInversion
+from models.p2p.inversion import DirectInversion, NullInversion
 from .proximal_guidance_forward import proximal_guidance_forward
 from models.p2p.scheduler_dev import DDIMSchedulerDev
 

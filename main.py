@@ -57,9 +57,9 @@ if __name__ == "__main__":
         nargs="+",
         type=str,
         default=[
+            "null-text-inversion+masactrl",
             "directinversion+masactrl",
             "ddim+masactrl",
-            "null-text-inversion+masactrl",
         ],
     )  # the editing methods that needed to run
     # available editing methods combination:

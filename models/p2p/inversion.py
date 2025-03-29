@@ -7,6 +7,292 @@ from models.p2p.attention_control import register_attention_control
 from utils.utils import image2latent, latent2image
 
 
+class NullInversion:
+
+    def prev_step(self, model_output, timestep: int, sample):
+        prev_timestep = (
+            timestep
+            - self.scheduler.config.num_train_timesteps
+            // self.scheduler.num_inference_steps
+        )
+        alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
+        alpha_prod_t_prev = (
+            self.scheduler.alphas_cumprod[prev_timestep]
+            if prev_timestep >= 0
+            else self.scheduler.final_alpha_cumprod
+        )
+        beta_prod_t = 1 - alpha_prod_t
+        pred_original_sample = (
+            sample - beta_prod_t**0.5 * model_output
+        ) / alpha_prod_t**0.5
+        pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 * model_output
+        prev_sample = (
+            alpha_prod_t_prev**0.5 * pred_original_sample + pred_sample_direction
+        )
+        return prev_sample
+
+    def next_step(self, model_output, timestep: int, sample):
+        timestep, next_timestep = (
+            min(
+                timestep
+                - self.scheduler.config.num_train_timesteps
+                // self.scheduler.num_inference_steps,
+                999,
+            ),
+            timestep,
+        )
+        alpha_prod_t = (
+            self.scheduler.alphas_cumprod[timestep]
+            if timestep >= 0
+            else self.scheduler.final_alpha_cumprod
+        )
+        alpha_prod_t_next = self.scheduler.alphas_cumprod[next_timestep]
+        beta_prod_t = 1 - alpha_prod_t
+        next_original_sample = (
+            sample - beta_prod_t**0.5 * model_output
+        ) / alpha_prod_t**0.5
+        next_sample_direction = (1 - alpha_prod_t_next) ** 0.5 * model_output
+        next_sample = (
+            alpha_prod_t_next**0.5 * next_original_sample + next_sample_direction
+        )
+        return next_sample
+
+    def get_noise_pred_single(self, latents, t, context, context_p, add_time_ids):
+        print("✅ get_noise_pred_single()")
+        latents = self.scheduler.scale_model_input(latents, t)  # 우리 코드
+        added_cond_kwargs = {"text_embeds": context_p, "time_ids": add_time_ids}
+        noise_pred = self.model.unet(
+            latents,
+            t,
+            encoder_hidden_states=context,
+            added_cond_kwargs=added_cond_kwargs,
+        )["sample"]
+        return noise_pred
+
+    def get_noise_pred(
+        self,
+        latents,
+        t,
+        guidance_scale,
+        is_forward=True,
+        context=None,
+        context_p=None,
+        add_time_ids=None,
+    ):
+        print("✅ get_noise_pred()")
+        latents_input = torch.cat([latents] * 2)
+
+        context = context if context is not None else self.context
+        context_p = context_p if context_p is not None else self.context_p
+        add_time_ids = add_time_ids if add_time_ids is not None else self.add_time_ids
+
+        if context is None:
+            context = self.context
+
+        guidance_scale = 1 if is_forward else guidance_scale
+
+        latents_input = self.scheduler.scale_model_input(latents_input, t)  # 우리 코드
+        added_cond_kwargs = {"text_embeds": context_p, "time_ids": add_time_ids}
+        noise_pred = self.model.unet(
+            latents_input,
+            t,
+            encoder_hidden_states=context,
+            added_cond_kwargs=added_cond_kwargs,
+        )["sample"]
+
+        noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
+        noise_pred = noise_pred_uncond + guidance_scale * (
+            noise_prediction_text - noise_pred_uncond
+        )
+        if is_forward:
+            latents = self.next_step(noise_pred, t, latents)
+        else:
+            latents = self.prev_step(noise_pred, t, latents)
+        return latents
+
+    @torch.no_grad()
+    def init_prompt(self, prompt: str):
+        print("✅ init_prompt() -", prompt)
+
+        compel = Compel(
+            tokenizer=[self.model.tokenizer, self.model.tokenizer_2],
+            text_encoder=[self.model.text_encoder, self.model.text_encoder_2],
+            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+            requires_pooled=[False, True],
+        )
+
+        prompt_embeds, pooled_prompt_embeds = compel(prompt)
+        negative_prompt_embeds, negative_pooled_prompt_embeds = compel(
+            [""]  # 한 개만 전달
+        )
+
+        self.model.vae_scale_factor = 2 ** (
+            len(self.model.vae.config.block_out_channels) - 1
+        )
+        self.model.default_sample_size = self.model.unet.config.sample_size
+
+        height = self.model.default_sample_size * self.model.vae_scale_factor
+        width = self.model.default_sample_size * self.model.vae_scale_factor
+
+        original_size = (height, width)
+        target_size = (height, width)
+        crops_coords_top_left = (0, 0)
+        add_time_ids = list(original_size + crops_coords_top_left + target_size)
+
+        passed_add_embed_dim = (
+            self.model.unet.config.addition_time_embed_dim * len(add_time_ids)
+            + self.model.text_encoder_2.config.projection_dim
+        )
+        expected_add_embed_dim = self.model.unet.add_embedding.linear_1.in_features
+
+        if expected_add_embed_dim != passed_add_embed_dim:
+            raise ValueError(
+                f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
+            )
+
+        add_time_ids = torch.tensor([add_time_ids], dtype=self.model.unet.dtype).to(
+            self.model.device
+        )
+        batch_size = prompt_embeds.shape[0]
+        add_time_ids = add_time_ids.repeat(batch_size, 1)
+
+        self.context = torch.cat([negative_prompt_embeds, prompt_embeds])
+        self.context_p = torch.cat(
+            [negative_pooled_prompt_embeds, pooled_prompt_embeds]
+        )
+
+        self.add_time_ids = torch.cat([add_time_ids, add_time_ids])
+        self.prompt = prompt
+
+    @torch.no_grad()
+    def ddim_loop(self, latent):
+        print("✅ ddim_loop()")
+
+        uncond_embeddings, cond_embeddings = self.context.chunk(2)
+        uncond_embeddings_p, cond_embeddings_p = self.context_p.chunk(2)
+        add_time_ids1, add_time_ids2 = self.add_time_ids.chunk(2)
+
+        all_latent = [latent]
+        latent = latent.clone().detach()
+
+        for i in range(self.num_ddim_steps):
+            t = self.model.scheduler.timesteps[
+                len(self.model.scheduler.timesteps) - i - 1
+            ]
+            noise_pred = self.get_noise_pred_single(
+                latent, t, cond_embeddings, cond_embeddings_p, add_time_ids2
+            )  # [[0]] ?
+            latent = self.next_step(noise_pred, t, latent)
+            all_latent.append(latent)
+        return all_latent
+
+    @property
+    def scheduler(self):
+        return self.model.scheduler
+
+    @torch.no_grad()
+    def ddim_inversion(self, image):
+        print("✅ ddim_inversion()")
+        latent = image2latent(self.model.vae, image)
+        image_rec = latent2image(self.model.vae, latent)[0]
+        ddim_latents = self.ddim_loop(latent)
+        return image_rec, ddim_latents
+
+    def null_optimization(self, latents, num_inner_steps, epsilon, guidance_scale):
+        print("✅ null_optimization()")
+
+        uncond_embeddings, cond_embeddings = self.context.chunk(2)
+        uncond_embeddings_p, cond_embeddings_p = self.context_p.chunk(2)
+        add_time_ids1, add_time_ids2 = self.add_time_ids.chunk(2)
+
+        uncond_embeddings_list = []
+        uncond_embeddings_p_list = []
+        latent_cur = latents[-1]
+
+        for i in range(self.num_ddim_steps):
+            uncond_embeddings = uncond_embeddings.clone().detach()
+            uncond_embeddings_p = uncond_embeddings_p.clone().detach()
+            add_time_ids1 = add_time_ids1.clone().detach()
+
+            t = self.model.scheduler.timesteps[i]
+            if num_inner_steps != 0:
+                uncond_embeddings.requires_grad = True
+                optimizer = Adam(
+                    [uncond_embeddings, uncond_embeddings_p],
+                    lr=1e-2 * (1.0 - i / 100.0),
+                )
+                latent_prev = latents[len(latents) - i - 2]
+
+                with torch.no_grad():
+                    noise_pred_cond = self.get_noise_pred_single(
+                        latent_cur, t, cond_embeddings, cond_embeddings_p, add_time_ids2
+                    )
+
+                for j in range(num_inner_steps):
+                    noise_pred_uncond = self.get_noise_pred_single(
+                        latent_cur,
+                        t,
+                        uncond_embeddings,
+                        uncond_embeddings_p,
+                        add_time_ids1,
+                    )
+                    noise_pred = noise_pred_uncond + guidance_scale * (
+                        noise_pred_cond - noise_pred_uncond
+                    )
+                    latents_prev_rec = self.prev_step(noise_pred, t, latent_cur)
+                    loss = nnf.mse_loss(latents_prev_rec, latent_prev)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    loss_item = loss.item()
+                    if loss_item < epsilon + i * 2e-5:
+                        break
+
+            uncond_embeddings_list.append(uncond_embeddings[:1].detach())
+            uncond_embeddings_p_list.append(uncond_embeddings_p[:1].detach())
+
+            with torch.no_grad():
+                context = torch.cat([uncond_embeddings, cond_embeddings])
+                context_p = torch.cat([uncond_embeddings_p, cond_embeddings_p])
+                add_time_ids = torch.cat([add_time_ids1, add_time_ids2])
+                latent_cur = self.get_noise_pred(
+                    latent_cur,
+                    t,
+                    guidance_scale,
+                    False,
+                    context,
+                    context_p=context_p,
+                    add_time_ids=add_time_ids,
+                )
+
+        return uncond_embeddings_list
+
+    def invert(
+        self,
+        image_gt,
+        prompt,
+        guidance_scale,
+        num_inner_steps=10,
+        early_stop_epsilon=1e-5,
+    ):
+        self.init_prompt(prompt)
+        register_attention_control(self.model, None)
+
+        image_rec, ddim_latents = self.ddim_inversion(image_gt)
+
+        uncond_embeddings = self.null_optimization(
+            ddim_latents, num_inner_steps, early_stop_epsilon, guidance_scale
+        )
+        return image_gt, image_rec, ddim_latents, uncond_embeddings
+
+    def __init__(self, model, num_ddim_steps):
+        self.model = model
+        self.tokenizer = self.model.tokenizer
+        self.prompt = None
+        self.context = None
+        self.num_ddim_steps = num_ddim_steps
+
+
 class DirectInversion:
     def prev_step(self, model_output, timestep: int, sample):
         print("✅ prev_step()")
