@@ -125,6 +125,8 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
         noise_loss_list=None,
         **kwds,
     ):
+        print("✅ invert()", prompt)
+
         DEVICE = (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
@@ -133,6 +135,9 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
         elif isinstance(prompt, str):
             if batch_size > 1:
                 prompt = [prompt] * batch_size
+
+        print("📦 batch_size =", batch_size)
+        print("📦 prompt =", prompt)
 
         # prompt embedding
         compel = Compel(
@@ -246,12 +251,7 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
 
-        if isinstance(prompt, list):
-            if batch_size == 1:
-                image = image.expand(len(prompt), -1, -1, -1)
-        elif isinstance(prompt, str):
-            if batch_size > 1:
-                prompt = [prompt] * batch_size
+        prompt = [prompt]
 
         # prompt embedding
         compel = Compel(
@@ -262,7 +262,14 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
         )
 
         prompt_embeds, pooled_prompt_embeds = compel(prompt)
-        negative_prompt_embeds, negative_pooled_prompt_embeds = compel("")
+        negative_prompt_embeds, negative_pooled_prompt_embeds = compel(
+            [""] * len(prompt)
+        )
+
+        print("📦 prompt_embeds =", prompt_embeds.shape)
+        print("📦 pooled_prompt_embeds =", pooled_prompt_embeds.shape)
+        print("📦 negative_prompt_embeds =", negative_prompt_embeds.shape)
+        print("📦 negative_pooled_prompt_embeds =", negative_pooled_prompt_embeds.shape)
 
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         self.default_sample_size = self.unet.config.sample_size
@@ -294,6 +301,9 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
         context = torch.cat([negative_prompt_embeds, prompt_embeds])
         context_p = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds])
 
+        print("📦 context =", context.shape)
+        print("📦 context_p =", context_p.shape)
+
         # define initial latents
         latents = self.image2latent(image)
         start_latents = latents
@@ -310,6 +320,7 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
             tqdm(reversed(self.scheduler.timesteps), desc="DDIM Inversion")
         ):
             model_inputs = torch.cat([latents] * 2)
+            print("📦 model_inputs =", model_inputs.shape)
 
             # predict the noise
             added_cond_kwargs = {
@@ -330,6 +341,9 @@ class MasaCtrlPipeline(StableDiffusionXLPipeline):
 
             # compute the previous noise sample x_t-1 -> x_t
             latents, pred_x0 = self.next_step(noise_pred, t, latents)
+
+            print("📦 latents and pred_x0 =", latents.shape, pred_x0.shape)
+
             latents_list.append(latents)
             pred_x0_list.append(pred_x0)
 

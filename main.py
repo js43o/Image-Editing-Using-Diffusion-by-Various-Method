@@ -38,7 +38,7 @@ def setup_seed(seed=1234):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--rerun_exist_images", action="store_true"
+        "--rerun_exist_images", action="store_true", default=True
     )  # rerun existing images
     parser.add_argument(
         "--data_path", type=str, default="img"
@@ -57,9 +57,9 @@ if __name__ == "__main__":
         nargs="+",
         type=str,
         default=[
+            "directinversion+masactrl",
             "ddim+masactrl",
             "null-text-inversion+masactrl",
-            "directinversion+masactrl",
         ],
     )  # the editing methods that needed to run
     # available editing methods combination:
@@ -81,13 +81,17 @@ if __name__ == "__main__":
     #     if item["editing_type_id"] not in edit_category_list:
     #         continue
 
-    original_prompt = "Two birds on a branch"  # item["original_prompt"].replace("[", "").replace("]", "")
-    editing_prompt = "Two frogs on a branch"  # item["editing_prompt"].replace("[", "").replace("]", "")
-    image_path = "./img/bird.png"  # os.path.join(f"{data_path}/annotation_images", item["image_path"])
+    original_prompt = (
+        "A smiling girl"  # item["original_prompt"].replace("[", "").replace("]", "")
+    )
+    editing_prompt = (
+        "A angry girl"  # item["editing_prompt"].replace("[", "").replace("]", "")
+    )
+    image_path = "./img/girl.png"  # os.path.join(f"{data_path}/annotation_images", item["image_path"])
     editing_instruction = ""  # item["editing_instruction"]
     blended_word = [
-        "birds",
-        "frogs",
+        "smiling",
+        "angry",
     ]  # item["blended_word"].split(" ") if item["blended_word"] != "" else []
     # mask = Image.fromarray(np.uint8(mask_decode(item["mask"])[:,:,np.newaxis].repeat(3,2))).convert("L")
     mask = Image.fromarray(
@@ -106,6 +110,7 @@ if __name__ == "__main__":
             print(f"editing image [{image_path}] with [{edit_method}]")
             setup_seed()
             torch.cuda.empty_cache()
+
             print(edit_method)
             if edit_method.split("+")[-1] == "p2p":
                 from models.p2p.p2p_editor import P2PEditor
