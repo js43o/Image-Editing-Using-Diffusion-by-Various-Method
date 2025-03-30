@@ -1,13 +1,21 @@
 import torch
-from diffusers import AutoencoderKL, UNet2DConditionModel, DDIMScheduler, StableDiffusionPipeline
+from diffusers import (
+    AutoencoderKL,
+    UNet2DConditionModel,
+    DDIMScheduler,
+    StableDiffusionPipeline,
+)
 import numpy as np
 from PIL import Image
 import torch.nn as nn
 from transformers import CLIPTextModel, CLIPTokenizer
-from models.p2p.inversion import DirectInversion, NullInversion, NegativePromptInversion
+from models.p2p.inversion import (
+    DirectInversion,
+    NullInversion,
+)  # , NegativePromptInversion
 import torchvision.transforms as T
 
-from utils.utils import txt_draw,load_512,latent2image
+from utils.utils import txt_draw, load_512, latent2image
 
 
 def get_timesteps(scheduler, num_inference_steps, strength, device):
@@ -19,54 +27,70 @@ def get_timesteps(scheduler, num_inference_steps, strength, device):
 
     return timesteps, num_inference_steps - t_start
 
+
 class Preprocess(nn.Module):
-    def __init__(self, device,model_key,num_ddim_steps):
+    def __init__(self, device, model_key, num_ddim_steps):
         super().__init__()
 
         self.device = device
         self.use_depth = False
 
-        print(f'[INFO] loading stable diffusion...')
+        print(f"[INFO] loading stable diffusion...")
         # Create model
-        self.vae = AutoencoderKL.from_pretrained(model_key, subfolder="vae", 
-                                                 ).to(self.device)
+        self.vae = AutoencoderKL.from_pretrained(
+            model_key,
+            subfolder="vae",
+        ).to(self.device)
         self.tokenizer = CLIPTokenizer.from_pretrained(model_key, subfolder="tokenizer")
-        self.text_encoder = CLIPTextModel.from_pretrained(model_key, subfolder="text_encoder",
-                                                          ).to(self.device)
-        self.unet = UNet2DConditionModel.from_pretrained(model_key, subfolder="unet",
-                                                         ).to(self.device)
+        self.text_encoder = CLIPTextModel.from_pretrained(
+            model_key,
+            subfolder="text_encoder",
+        ).to(self.device)
+        self.unet = UNet2DConditionModel.from_pretrained(
+            model_key,
+            subfolder="unet",
+        ).to(self.device)
         self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler")
         self.scheduler.set_timesteps(num_ddim_steps)
-        print(f'[INFO] loaded stable diffusion!')
-
+        print(f"[INFO] loaded stable diffusion!")
 
     @torch.no_grad()
     def get_text_embeds(self, prompt, negative_prompt, device="cuda"):
-        text_input = self.tokenizer(prompt, padding='max_length', max_length=self.tokenizer.model_max_length,
-                                    truncation=True, return_tensors='pt')
+        print("✅ get_text_embeds()")
+        text_input = self.tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
         text_embeddings = self.text_encoder(text_input.input_ids.to(device))[0]
-        uncond_input = self.tokenizer(negative_prompt, padding='max_length', max_length=self.tokenizer.model_max_length,
-                                      return_tensors='pt')
+        uncond_input = self.tokenizer(
+            negative_prompt,
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            return_tensors="pt",
+        )
         uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(device))[0]
         text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
         return text_embeddings
 
     @torch.no_grad()
     def decode_latents(self, latents):
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
             latents = 1 / 0.18215 * latents
             imgs = self.vae.decode(latents).sample
             imgs = (imgs / 2 + 0.5).clamp(0, 1)
         return imgs
 
     def load_img(self, image_path):
-        image_pil = T.Resize([512,512])(Image.open(image_path).convert("RGB"))
+        image_pil = T.Resize([512, 512])(Image.open(image_path).convert("RGB"))
         image = T.ToTensor()(image_pil).unsqueeze(0).to(self.device)
         return image
 
     @torch.no_grad()
     def encode_imgs(self, imgs):
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
             imgs = 2 * imgs - 1
             posterior = self.vae.encode(imgs).latent_dist
             latents = posterior.mean * 0.18215
@@ -74,20 +98,22 @@ class Preprocess(nn.Module):
 
     @torch.no_grad()
     def ddim_inversion(self, cond, latent):
-        latent_list=[latent]
+        print("✅ ddim_inversion()")
+        latent_list = [latent]
         timesteps = reversed(self.scheduler.timesteps)
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
             for i, t in enumerate(timesteps):
                 cond_batch = cond.repeat(latent.shape[0], 1, 1)
 
                 alpha_prod_t = self.scheduler.alphas_cumprod[t]
                 alpha_prod_t_prev = (
                     self.scheduler.alphas_cumprod[timesteps[i - 1]]
-                    if i > 0 else self.scheduler.final_alpha_cumprod
+                    if i > 0
+                    else self.scheduler.final_alpha_cumprod
                 )
 
-                mu = alpha_prod_t ** 0.5
-                mu_prev = alpha_prod_t_prev ** 0.5
+                mu = alpha_prod_t**0.5
+                mu_prev = alpha_prod_t_prev**0.5
                 sigma = (1 - alpha_prod_t) ** 0.5
                 sigma_prev = (1 - alpha_prod_t_prev) ** 0.5
 
@@ -100,55 +126,72 @@ class Preprocess(nn.Module):
 
     @torch.no_grad()
     def ddim_sample(self, x, cond):
+        print("✅ ddim_sample()")
         timesteps = self.scheduler.timesteps
-        latent_list=[]
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
+        latent_list = []
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
             for i, t in enumerate(timesteps):
-                    cond_batch = cond.repeat(x.shape[0], 1, 1)
-                    alpha_prod_t = self.scheduler.alphas_cumprod[t]
-                    alpha_prod_t_prev = (
-                        self.scheduler.alphas_cumprod[timesteps[i + 1]]
-                        if i < len(timesteps) - 1
-                        else self.scheduler.final_alpha_cumprod
-                    )
-                    mu = alpha_prod_t ** 0.5
-                    sigma = (1 - alpha_prod_t) ** 0.5
-                    mu_prev = alpha_prod_t_prev ** 0.5
-                    sigma_prev = (1 - alpha_prod_t_prev) ** 0.5
+                cond_batch = cond.repeat(x.shape[0], 1, 1)
+                alpha_prod_t = self.scheduler.alphas_cumprod[t]
+                alpha_prod_t_prev = (
+                    self.scheduler.alphas_cumprod[timesteps[i + 1]]
+                    if i < len(timesteps) - 1
+                    else self.scheduler.final_alpha_cumprod
+                )
+                mu = alpha_prod_t**0.5
+                sigma = (1 - alpha_prod_t) ** 0.5
+                mu_prev = alpha_prod_t_prev**0.5
+                sigma_prev = (1 - alpha_prod_t_prev) ** 0.5
 
-                    eps = self.unet(x, t, encoder_hidden_states=cond_batch).sample
+                eps = self.unet(x, t, encoder_hidden_states=cond_batch).sample
 
-                    pred_x0 = (x - sigma * eps) / mu
-                    x = mu_prev * pred_x0 + sigma_prev * eps
-                    latent_list.append(x)
+                pred_x0 = (x - sigma * eps) / mu
+                x = mu_prev * pred_x0 + sigma_prev * eps
+                latent_list.append(x)
         return latent_list
-    
+
     def prev_step(self, model_output, timestep: int, sample):
-        prev_timestep = timestep - self.scheduler.config.num_train_timesteps // self.scheduler.num_inference_steps
+        prev_timestep = (
+            timestep
+            - self.scheduler.config.num_train_timesteps
+            // self.scheduler.num_inference_steps
+        )
         alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
-        alpha_prod_t_prev = self.scheduler.alphas_cumprod[prev_timestep] if prev_timestep >= 0 else self.scheduler.final_alpha_cumprod
+        alpha_prod_t_prev = (
+            self.scheduler.alphas_cumprod[prev_timestep]
+            if prev_timestep >= 0
+            else self.scheduler.final_alpha_cumprod
+        )
         beta_prod_t = 1 - alpha_prod_t
-        pred_original_sample = (sample - beta_prod_t ** 0.5 * model_output) / alpha_prod_t ** 0.5
+        pred_original_sample = (
+            sample - beta_prod_t**0.5 * model_output
+        ) / alpha_prod_t**0.5
         pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 * model_output
-        prev_sample = alpha_prod_t_prev ** 0.5 * pred_original_sample + pred_sample_direction
-        
-        difference_scale_pred_original_sample= - beta_prod_t ** 0.5  / alpha_prod_t ** 0.5
-        difference_scale_pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5 
-        difference_scale = alpha_prod_t_prev ** 0.5 * difference_scale_pred_original_sample + difference_scale_pred_sample_direction
-        
-        return prev_sample,difference_scale
-    
+        prev_sample = (
+            alpha_prod_t_prev**0.5 * pred_original_sample + pred_sample_direction
+        )
+
+        difference_scale_pred_original_sample = -(beta_prod_t**0.5) / alpha_prod_t**0.5
+        difference_scale_pred_sample_direction = (1 - alpha_prod_t_prev) ** 0.5
+        difference_scale = (
+            alpha_prod_t_prev**0.5 * difference_scale_pred_original_sample
+            + difference_scale_pred_sample_direction
+        )
+
+        return prev_sample, difference_scale
+
     def get_noise_pred_single(self, latents, t, context):
+        print("✅ get_noise_pred_single()")
         # print("latent shape",latents.shape)
         # print("context shape",context.shape)
         noise_pred = self.unet(latents, t, encoder_hidden_states=context).sample
         return noise_pred
-    
-    
 
     @torch.no_grad()
-    def extract_latents(self, num_steps, data_path,
-                        inversion_prompt='', guidance_scale=7.5):
+    def extract_latents(
+        self, num_steps, data_path, inversion_prompt="", guidance_scale=7.5
+    ):
+        print("✅ extract_latents()")
         self.scheduler.set_timesteps(num_steps)
 
         cond_ = self.get_text_embeds(inversion_prompt, "")
@@ -156,28 +199,37 @@ class Preprocess(nn.Module):
         image = self.load_img(data_path)
         latent = self.encode_imgs(image)
 
-        inverted_x = self.ddim_inversion(cond, latent) #X0, X1, ..., XT
-        latent_reconstruction = self.ddim_sample(inverted_x[-1], cond) #XT', XT-1', ..., X0'
+        inverted_x = self.ddim_inversion(cond, latent)  # X0, X1, ..., XT
+        latent_reconstruction = self.ddim_sample(
+            inverted_x[-1], cond
+        )  # XT', XT-1', ..., X0'
         rgb_reconstruction = self.decode_latents(latent_reconstruction[-1])
-        latent_reconstruction.reverse() #X0', X1', ..., XT'
+        latent_reconstruction.reverse()  # X0', X1', ..., XT'
         return inverted_x, rgb_reconstruction, latent_reconstruction
 
 
 def register_time(model, t):
     conv_module = model.unet.up_blocks[1].resnets[1]
-    setattr(conv_module, 't', t)
+    setattr(conv_module, "t", t)
     down_res_dict = {0: [0, 1], 1: [0, 1], 2: [0, 1]}
     up_res_dict = {1: [0, 1, 2], 2: [0, 1, 2], 3: [0, 1, 2]}
     for res in up_res_dict:
         for block in up_res_dict[res]:
-            module = model.unet.up_blocks[res].attentions[block].transformer_blocks[0].attn1
-            setattr(module, 't', t)
+            module = (
+                model.unet.up_blocks[res].attentions[block].transformer_blocks[0].attn1
+            )
+            setattr(module, "t", t)
     for res in down_res_dict:
         for block in down_res_dict[res]:
-            module = model.unet.down_blocks[res].attentions[block].transformer_blocks[0].attn1
-            setattr(module, 't', t)
+            module = (
+                model.unet.down_blocks[res]
+                .attentions[block]
+                .transformer_blocks[0]
+                .attn1
+            )
+            setattr(module, "t", t)
     module = model.unet.mid_block.attentions[0].transformer_blocks[0].attn1
-    setattr(module, 't', t)
+    setattr(module, "t", t)
 
 
 def register_attention_control_efficient(model, injection_schedule):
@@ -189,23 +241,27 @@ def register_attention_control_efficient(model, injection_schedule):
             to_out = self.to_out
 
         def forward(x, encoder_hidden_states=None, attention_mask=None):
+            print("✅ sa_forward()")
             batch_size, sequence_length, dim = x.shape
             h = self.heads
 
             is_cross = encoder_hidden_states is not None
             encoder_hidden_states = encoder_hidden_states if is_cross else x
-            if not is_cross and self.injection_schedule is not None and (
-                    self.t in self.injection_schedule or self.t == 1000):
+            if (
+                not is_cross
+                and self.injection_schedule is not None
+                and (self.t in self.injection_schedule or self.t == 1000)
+            ):
                 q = self.to_q(x)
                 k = self.to_k(encoder_hidden_states)
 
                 source_batch_size = int(q.shape[0] // 3)
                 # inject unconditional
-                q[source_batch_size:2 * source_batch_size] = q[:source_batch_size]
-                k[source_batch_size:2 * source_batch_size] = k[:source_batch_size]
+                q[source_batch_size : 2 * source_batch_size] = q[:source_batch_size]
+                k[source_batch_size : 2 * source_batch_size] = k[:source_batch_size]
                 # inject conditional
-                q[2 * source_batch_size:] = q[:source_batch_size]
-                k[2 * source_batch_size:] = k[:source_batch_size]
+                q[2 * source_batch_size :] = q[:source_batch_size]
+                k[2 * source_batch_size :] = k[:source_batch_size]
 
                 q = self.head_to_batch_dim(q)
                 k = self.head_to_batch_dim(k)
@@ -235,17 +291,24 @@ def register_attention_control_efficient(model, injection_schedule):
 
         return forward
 
-    res_dict = {1: [1, 2], 2: [0, 1, 2], 3: [0, 1, 2]}  # we are injecting attention in blocks 4 - 11 of the decoder, so not in the first block of the lowest resolution
+    res_dict = {
+        1: [1, 2],
+        2: [0, 1, 2],
+        3: [0, 1, 2],
+    }  # we are injecting attention in blocks 4 - 11 of the decoder, so not in the first block of the lowest resolution
     for res in res_dict:
         for block in res_dict[res]:
-            module = model.unet.up_blocks[res].attentions[block].transformer_blocks[0].attn1
+            module = (
+                model.unet.up_blocks[res].attentions[block].transformer_blocks[0].attn1
+            )
             module.forward = sa_forward(module)
-            setattr(module, 'injection_schedule', injection_schedule)
+            setattr(module, "injection_schedule", injection_schedule)
 
 
 def register_conv_control_efficient(model, injection_schedule):
     def conv_forward(self):
         def forward(input_tensor, temb):
+            print("✅ conv_forward()")
             hidden_states = input_tensor
 
             hidden_states = self.norm1(hidden_states)
@@ -280,12 +343,18 @@ def register_conv_control_efficient(model, injection_schedule):
 
             hidden_states = self.dropout(hidden_states)
             hidden_states = self.conv2(hidden_states)
-            if self.injection_schedule is not None and (self.t in self.injection_schedule or self.t == 1000):
+            if self.injection_schedule is not None and (
+                self.t in self.injection_schedule or self.t == 1000
+            ):
                 source_batch_size = int(hidden_states.shape[0] // 3)
                 # inject unconditional
-                hidden_states[source_batch_size:2 * source_batch_size] = hidden_states[:source_batch_size]
+                hidden_states[source_batch_size : 2 * source_batch_size] = (
+                    hidden_states[:source_batch_size]
+                )
                 # inject conditional
-                hidden_states[2 * source_batch_size:] = hidden_states[:source_batch_size]
+                hidden_states[2 * source_batch_size :] = hidden_states[
+                    :source_batch_size
+                ]
 
             if self.conv_shortcut is not None:
                 input_tensor = self.conv_shortcut(input_tensor)
@@ -298,18 +367,21 @@ def register_conv_control_efficient(model, injection_schedule):
 
     conv_module = model.unet.up_blocks[1].resnets[1]
     conv_module.forward = conv_forward(conv_module)
-    setattr(conv_module, 'injection_schedule', injection_schedule)
+    setattr(conv_module, "injection_schedule", injection_schedule)
+
 
 class PNP(nn.Module):
-    def __init__(self,num_ddim_steps=50,device="cuda"):
+    def __init__(self, num_ddim_steps=50, device="cuda"):
         super().__init__()
         self.device = device
         model_key = "runwayml/stable-diffusion-v1-5"
 
         # Create SD models
-        print('Loading SD model')
+        print("Loading SD model")
 
-        pipe = StableDiffusionPipeline.from_pretrained(model_key, torch_dtype=torch.float16).to("cuda")
+        pipe = StableDiffusionPipeline.from_pretrained(
+            model_key, torch_dtype=torch.float16
+        ).to("cuda")
         pipe.enable_xformers_memory_efficient_attention()
 
         self.vae = pipe.vae
@@ -319,234 +391,368 @@ class PNP(nn.Module):
 
         self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler")
         self.scheduler.set_timesteps(num_ddim_steps, device=self.device)
-        self.num_ddim_steps=num_ddim_steps
+        self.num_ddim_steps = num_ddim_steps
 
-        
-        self.toy_scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler")
+        self.toy_scheduler = DDIMScheduler.from_pretrained(
+            model_key, subfolder="scheduler"
+        )
         self.toy_scheduler.set_timesteps(self.num_ddim_steps)
-        timesteps_to_save, num_inference_steps = get_timesteps(self.toy_scheduler, num_inference_steps=self.num_ddim_steps,
-                                                                strength=1.0,
-                                                                device=self.device)
+        timesteps_to_save, num_inference_steps = get_timesteps(
+            self.toy_scheduler,
+            num_inference_steps=self.num_ddim_steps,
+            strength=1.0,
+            device=self.device,
+        )
         self.timesteps_to_save = timesteps_to_save
         self.num_inference_steps = num_inference_steps
-        self.model = Preprocess(self.device, model_key=model_key, num_ddim_steps=num_ddim_steps)
-        
-        print('SD model loaded')
+        self.model = Preprocess(
+            self.device, model_key=model_key, num_ddim_steps=num_ddim_steps
+        )
 
-    def __call__(self, edit_method, image_path, prompt_src, prompt_tar, guidance_scale=7.5, image_size=[512,512]):
-        if edit_method=="ddim+pnp":
-            return self.edit_image_ddim_PnP(image_path, prompt_src, prompt_tar, guidance_scale, image_size)
-        elif edit_method=="directinversion+pnp":
-            return self.edit_image_directinversion_PnP(image_path, prompt_src, prompt_tar, guidance_scale, image_size)
-        elif edit_method=="null-text-inversion+pnp":
-            return self.edit_image_null_text_inversion_pnp(image_path, prompt_src, prompt_tar, guidance_scale, image_size)
-        elif edit_method=="negative-prompt-inversion+pnp":
-            return self.edit_image_negative_prompt_inversion_pnp(image_path, prompt_src, prompt_tar, guidance_scale, image_size)
-        
+        print("SD model loaded")
+
+    def __call__(
+        self,
+        edit_method,
+        image_path,
+        prompt_src,
+        prompt_tar,
+        guidance_scale=7.5,
+        image_size=[512, 512],
+    ):
+        if edit_method == "ddim+pnp":
+            return self.edit_image_ddim_PnP(
+                image_path, prompt_src, prompt_tar, guidance_scale, image_size
+            )
+        elif edit_method == "directinversion+pnp":
+            return self.edit_image_directinversion_PnP(
+                image_path, prompt_src, prompt_tar, guidance_scale, image_size
+            )
+        elif edit_method == "null-text-inversion+pnp":
+            return self.edit_image_null_text_inversion_pnp(
+                image_path, prompt_src, prompt_tar, guidance_scale, image_size
+            )
+        elif edit_method == "negative-prompt-inversion+pnp":
+            return self.edit_image_negative_prompt_inversion_pnp(
+                image_path, prompt_src, prompt_tar, guidance_scale, image_size
+            )
+
         else:
             raise ValueError(f"edit method {edit_method} not supported")
+
     @torch.no_grad()
     def get_text_embeds(self, prompt, negative_prompt, batch_size=1):
+        print("✅ get_text_embeds")
         # Tokenize text and get embeddings
-        text_input = self.tokenizer(prompt, padding='max_length', max_length=self.tokenizer.model_max_length,
-                                    truncation=True, return_tensors='pt')
+        text_input = self.tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
         text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]
 
         # Do the same for unconditional embeddings
-        uncond_input = self.tokenizer(negative_prompt, padding='max_length', max_length=self.tokenizer.model_max_length,
-                                      return_tensors='pt')
+        uncond_input = self.tokenizer(
+            negative_prompt,
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            return_tensors="pt",
+        )
 
         uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
 
         # Cat for final embeddings
-        text_embeddings = torch.cat([uncond_embeddings] * batch_size + [text_embeddings] * batch_size)
+        text_embeddings = torch.cat(
+            [uncond_embeddings] * batch_size + [text_embeddings] * batch_size
+        )
         return text_embeddings
 
     @torch.no_grad()
     def decode_latent(self, latent):
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
             latent = 1 / 0.18215 * latent
             img = self.vae.decode(latent).sample
             img = (img / 2 + 0.5).clamp(0, 1)
         return img
 
-    @torch.autocast(device_type='cuda', dtype=torch.float32)
-    def get_data(self,image_path):
+    @torch.autocast(device_type="cuda", dtype=torch.float32)
+    def get_data(self, image_path):
         # load image
-        image = Image.open(image_path).convert('RGB') 
+        image = Image.open(image_path).convert("RGB")
         image = image.resize((512, 512), resample=Image.Resampling.LANCZOS)
         image = T.ToTensor()(image).to(self.device)
         return image
 
     @torch.no_grad()
-    def denoise_step(self, x, i, t,guidance_scale,noisy_latent, null_or_negative=False):
+    def denoise_step(
+        self, x, i, t, guidance_scale, noisy_latent, null_or_negative=False
+    ):
         # register the time step and features in pnp injection modules
-        latent_model_input = torch.cat(([noisy_latent]+[x] * 2))
+        latent_model_input = torch.cat(([noisy_latent] + [x] * 2))
 
         register_time(self, t.item())
 
         # compute text embeddings
         if null_or_negative:
-            text_embed_input = torch.cat([self.pnp_guidance_embeds[i], self.text_embeds], dim=0)
+            text_embed_input = torch.cat(
+                [self.pnp_guidance_embeds[i], self.text_embeds], dim=0
+            )
         else:
-            text_embed_input = torch.cat([self.pnp_guidance_embeds, self.text_embeds], dim=0)
+            text_embed_input = torch.cat(
+                [self.pnp_guidance_embeds, self.text_embeds], dim=0
+            )
 
         # apply the denoising network
-        noise_pred = self.unet(latent_model_input, t, encoder_hidden_states=text_embed_input)['sample']
+        noise_pred = self.unet(
+            latent_model_input, t, encoder_hidden_states=text_embed_input
+        )["sample"]
 
         # perform guidance
-        _,noise_pred_uncond, noise_pred_cond = noise_pred.chunk(3)
-        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+        _, noise_pred_uncond, noise_pred_cond = noise_pred.chunk(3)
+        noise_pred = noise_pred_uncond + guidance_scale * (
+            noise_pred_cond - noise_pred_uncond
+        )
 
         # compute the denoising step with the reference model
-        denoised_latent = self.scheduler.step(noise_pred, t, x)['prev_sample']
+        denoised_latent = self.scheduler.step(noise_pred, t, x)["prev_sample"]
         # if noise_loss is not None:
         #     denoised_latent = torch.concat((denoised_latent[:1]+noise_loss[:1],denoised_latent[1:]))
         return denoised_latent
 
     def init_pnp(self, conv_injection_t, qk_injection_t):
-        self.qk_injectionum_ddim_steps = self.scheduler.timesteps[:qk_injection_t] if qk_injection_t >= 0 else []
-        self.conv_injectionum_ddim_steps = self.scheduler.timesteps[:conv_injection_t] if conv_injection_t >= 0 else []
+        self.qk_injectionum_ddim_steps = (
+            self.scheduler.timesteps[:qk_injection_t] if qk_injection_t >= 0 else []
+        )
+        self.conv_injectionum_ddim_steps = (
+            self.scheduler.timesteps[:conv_injection_t] if conv_injection_t >= 0 else []
+        )
         register_attention_control_efficient(self, self.qk_injectionum_ddim_steps)
         register_conv_control_efficient(self, self.conv_injectionum_ddim_steps)
 
-    def run_pnp(self,image_path,noisy_latent,target_prompt,guidance_scale=7.5, uncond_embeddings=None, pnp_f_t=0.8,pnp_attn_t=0.5):
-        
+    def run_pnp(
+        self,
+        image_path,
+        noisy_latent,
+        target_prompt,
+        guidance_scale=7.5,
+        uncond_embeddings=None,
+        pnp_f_t=0.8,
+        pnp_attn_t=0.5,
+    ):
+        print("✅ run_pnp")
         # load image
         self.image = self.get_data(image_path)
         self.eps = noisy_latent[-1]
 
-        self.text_embeds = self.get_text_embeds(target_prompt, "ugly, blurry, black, low res, unrealistic")
+        self.text_embeds = self.get_text_embeds(
+            target_prompt, "ugly, blurry, black, low res, unrealistic"
+        )
         if uncond_embeddings is None:
             self.pnp_guidance_embeds = self.get_text_embeds("", "").chunk(2)[0]
         else:
             self.pnp_guidance_embeds = uncond_embeddings
-        
+
         pnp_f_t = int(self.num_ddim_steps * pnp_f_t)
         pnp_attn_t = int(self.num_ddim_steps * pnp_attn_t)
         self.init_pnp(conv_injection_t=pnp_f_t, qk_injection_t=pnp_attn_t)
         if uncond_embeddings is None:
-            edited_img = self.sample_loop(self.eps,guidance_scale,noisy_latent)
+            edited_img = self.sample_loop(self.eps, guidance_scale, noisy_latent)
         else:
-            edited_img = self.sample_loop(self.eps,guidance_scale,noisy_latent, True)
+            edited_img = self.sample_loop(self.eps, guidance_scale, noisy_latent, True)
         return edited_img
 
-    def sample_loop(self, x,guidance_scale,noisy_latent, null_or_negative=False):
-        with torch.autocast(device_type='cuda', dtype=torch.float32):
+    def sample_loop(self, x, guidance_scale, noisy_latent, null_or_negative=False):
+        print("✅ sample_loop()")
+        with torch.autocast(device_type="cuda", dtype=torch.float32):
             for i, t in enumerate(self.scheduler.timesteps):
                 if null_or_negative:
-                    x = self.denoise_step(x, i, t,guidance_scale,noisy_latent[-1-i], null_or_negative)
+                    x = self.denoise_step(
+                        x, i, t, guidance_scale, noisy_latent[-1 - i], null_or_negative
+                    )
                 else:
-                    x = self.denoise_step(x, i, t,guidance_scale,noisy_latent[-1-i])
+                    x = self.denoise_step(x, i, t, guidance_scale, noisy_latent[-1 - i])
             decoded_latent = self.decode_latent(x)
-                
+
         return decoded_latent
 
-
-
-    def edit_image_ddim_PnP(self,
+    def edit_image_ddim_PnP(
+        self,
         image_path,
         prompt_src,
         prompt_tar,
         guidance_scale=7.5,
-        image_shape=[512,512]
+        image_shape=[512, 512],
     ):
         torch.cuda.empty_cache()
         image_gt = load_512(image_path)
-        _, rgb_reconstruction, latent_reconstruction, _ = self.model.extract_latents(data_path=image_path,
-                                            num_steps=self.num_ddim_steps,
-                                            inversion_prompt=prompt_src, guidance_scale=guidance_scale)
-        
-        edited_image=self.run_pnp(image_path,latent_reconstruction,prompt_tar,guidance_scale)
-        
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        _, rgb_reconstruction, latent_reconstruction = self.model.extract_latents(
+            data_path=image_path,
+            num_steps=self.num_ddim_steps,
+            inversion_prompt=prompt_src,
+            guidance_scale=guidance_scale,
+        )
 
-        return Image.fromarray(np.concatenate((
-            image_instruct,
-            image_gt,
-            np.uint8(255*np.array(rgb_reconstruction[0].permute(1,2,0).cpu().detach())),
-            np.uint8(255*np.array(edited_image[0].permute(1,2,0).cpu().detach())),
-            ),1))
+        edited_image = self.run_pnp(
+            image_path, latent_reconstruction, prompt_tar, guidance_scale
+        )
 
+        image_instruct = txt_draw(
+            f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}"
+        )
 
+        return Image.fromarray(
+            np.concatenate(
+                (
+                    image_instruct,
+                    image_gt,
+                    np.uint8(
+                        255
+                        * np.array(
+                            rgb_reconstruction[0].permute(1, 2, 0).cpu().detach()
+                        )
+                    ),
+                    np.uint8(
+                        255 * np.array(edited_image[0].permute(1, 2, 0).cpu().detach())
+                    ),
+                ),
+                1,
+            )
+        )
 
-    def edit_image_directinversion_PnP(self,
+    def edit_image_directinversion_PnP(
+        self,
         image_path,
         prompt_src,
         prompt_tar,
         guidance_scale=7.5,
-        image_shape=[512,512]
+        image_shape=[512, 512],
     ):
         torch.cuda.empty_cache()
         image_gt = load_512(image_path)
-        inverted_x, rgb_reconstruction, _ = self.model.extract_latents(data_path=image_path,
-                                            num_steps=self.num_ddim_steps,
-                                            inversion_prompt=prompt_src)
+        inverted_x, _, __ = self.model.extract_latents(
+            data_path=image_path,
+            num_steps=self.num_ddim_steps,
+            inversion_prompt=prompt_src,
+        )
 
-        edited_image=self.run_pnp(image_path,inverted_x,prompt_tar,guidance_scale)
-        
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        edited_image = self.run_pnp(image_path, inverted_x, prompt_tar, guidance_scale)
 
-        return Image.fromarray(np.concatenate((
-            image_instruct,
-            image_gt,
-            np.uint8(np.array(latent2image(model=self.vae, latents=inverted_x[1].to(self.vae.dtype))[0])),
-            np.uint8(255*np.array(edited_image[0].permute(1,2,0).cpu().detach())),
-            ),1))
+        image_instruct = txt_draw(
+            f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}"
+        )
 
-    def edit_image_null_text_inversion_pnp(self,image_path,
+        return Image.fromarray(
+            np.concatenate(
+                (
+                    image_instruct,
+                    image_gt,
+                    np.uint8(
+                        np.array(
+                            latent2image(
+                                model=self.vae, latents=inverted_x[1].to(self.vae.dtype)
+                            )[0]
+                        )
+                    ),
+                    np.uint8(
+                        255 * np.array(edited_image[0].permute(1, 2, 0).cpu().detach())
+                    ),
+                ),
+                1,
+            )
+        )
+
+    def edit_image_null_text_inversion_pnp(
+        self,
+        image_path,
         prompt_src,
         prompt_tar,
         guidance_scale=7.5,
-        image_shape=[512,512]
+        image_shape=[512, 512],
     ):
         torch.cuda.empty_cache()
         image_gt = load_512(image_path)
 
-        null_inversion = NullInversion(model=self.model,
-                                    num_ddim_steps=self.num_ddim_steps)
+        null_inversion = NullInversion(
+            model=self.model, num_ddim_steps=self.num_ddim_steps
+        )
 
         _, _, inverted_x, uncond_embeddings = null_inversion.invert(
-            image_gt=image_gt, prompt=prompt_src,guidance_scale=guidance_scale)
-        
+            image_gt=image_gt, prompt=prompt_src, guidance_scale=guidance_scale
+        )
 
-        edited_image=self.run_pnp(image_path,inverted_x,prompt_tar,guidance_scale, uncond_embeddings)
-        
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        edited_image = self.run_pnp(
+            image_path, inverted_x, prompt_tar, guidance_scale, uncond_embeddings
+        )
 
-        return Image.fromarray(np.concatenate((
-            image_instruct,
-            image_gt,
-            np.uint8(np.array(latent2image(model=self.vae, latents=inverted_x[1].to(self.vae.dtype))[0])),
-            np.uint8(255*np.array(edited_image[0].permute(1,2,0).cpu().detach())),
-            ),1))
-    
-    def edit_image_negative_prompt_inversion_pnp(self,image_path,
+        image_instruct = txt_draw(
+            f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}"
+        )
+
+        return Image.fromarray(
+            np.concatenate(
+                (
+                    image_instruct,
+                    image_gt,
+                    np.uint8(
+                        np.array(
+                            latent2image(
+                                model=self.vae, latents=inverted_x[1].to(self.vae.dtype)
+                            )[0]
+                        )
+                    ),
+                    np.uint8(
+                        255 * np.array(edited_image[0].permute(1, 2, 0).cpu().detach())
+                    ),
+                ),
+                1,
+            )
+        )
+
+    def edit_image_negative_prompt_inversion_pnp(
+        self,
+        image_path,
         prompt_src,
         prompt_tar,
         guidance_scale=7.5,
-        image_shape=[512,512]
+        image_shape=[512, 512],
     ):
         torch.cuda.empty_cache()
         image_gt = load_512(image_path)
 
-        negative_inversion = NegativePromptInversion(model=self.model,
-                                    num_ddim_steps=self.num_ddim_steps)
+        negative_inversion = NegativePromptInversion(
+            model=self.model, num_ddim_steps=self.num_ddim_steps
+        )
 
         _, _, inverted_x, uncond_embeddings = negative_inversion.invert(
-            image_gt=image_gt, prompt=prompt_src)
-        
+            image_gt=image_gt, prompt=prompt_src
+        )
 
-        edited_image=self.run_pnp(image_path,inverted_x,prompt_tar,guidance_scale, uncond_embeddings)
-        
-        image_instruct = txt_draw(f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}")
+        edited_image = self.run_pnp(
+            image_path, inverted_x, prompt_tar, guidance_scale, uncond_embeddings
+        )
 
-        return Image.fromarray(np.concatenate((
-            image_instruct,
-            image_gt,
-            np.uint8(np.array(latent2image(model=self.vae, latents=inverted_x[1].to(self.vae.dtype))[0])),
-            np.uint8(255*np.array(edited_image[0].permute(1,2,0).cpu().detach())),
-            ),1))
+        image_instruct = txt_draw(
+            f"source prompt: {prompt_src}\ntarget prompt: {prompt_tar}"
+        )
 
-
-
+        return Image.fromarray(
+            np.concatenate(
+                (
+                    image_instruct,
+                    image_gt,
+                    np.uint8(
+                        np.array(
+                            latent2image(
+                                model=self.vae, latents=inverted_x[1].to(self.vae.dtype)
+                            )[0]
+                        )
+                    ),
+                    np.uint8(
+                        255 * np.array(edited_image[0].permute(1, 2, 0).cpu().detach())
+                    ),
+                ),
+                1,
+            )
+        )

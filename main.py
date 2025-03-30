@@ -58,9 +58,9 @@ if __name__ == "__main__":
         nargs="+",
         type=str,
         default=[
-            # "ddim+masactrl",
-            # "directinversion+masactrl",
-            "null-text-inversion+masactrl",
+            # "ddim+pnp",
+            # "directinversion+pnp",
+            "null-text-inversion+pnp",
         ],
     )  # the editing methods that needed to run
     # available editing methods combination:
@@ -86,10 +86,9 @@ if __name__ == "__main__":
     editing_prompt = "A sharp stone on the sand"  # item["editing_prompt"].replace("[", "").replace("]", "")
     image_path = "./img/stone.png"  # os.path.join(f"{data_path}/annotation_images", item["image_path"])
     editing_instruction = ""  # item["editing_instruction"]
-    blended_word = [
-        "stone",
-        "sharp stone",
-    ]  # item["blended_word"].split(" ") if item["blended_word"] != "" else []
+    blended_word = (
+        []
+    )  # item["blended_word"].split(" ") if item["blended_word"] != "" else []
     # mask = Image.fromarray(np.uint8(mask_decode(item["mask"])[:,:,np.newaxis].repeat(3,2))).convert("L")
     mask = Image.fromarray(
         np.uint8(
