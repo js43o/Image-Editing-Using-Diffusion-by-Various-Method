@@ -105,7 +105,7 @@ class Preprocess(nn.Module):
     @torch.no_grad()
     def decode_latents(self, latents):
         with torch.autocast(device_type="cuda", dtype=torch.float32):
-            latents = 1 / 0.18215 * latents
+            latents = 1 / 0.13025 * latents
             imgs = self.model.vae.decode(latents).sample
             imgs = (imgs / 2 + 0.5).clamp(0, 1)
         return imgs
@@ -120,7 +120,7 @@ class Preprocess(nn.Module):
         with torch.autocast(device_type="cuda", dtype=torch.float32):
             imgs = 2 * imgs - 1
             posterior = self.model.vae.encode(imgs).latent_dist
-            latents = posterior.mean * 0.18215
+            latents = posterior.mean * 0.13025
         return latents
 
     @torch.no_grad()
@@ -269,12 +269,22 @@ def register_time(model, t):
     up_res_dict = {1: [0, 1, 2], 2: [0, 1, 2], 3: [0, 1, 2]}
     for res in up_res_dict:
         for block in up_res_dict[res]:
+            if res >= len(model.unet.up_blocks) or not hasattr(
+                model.unet.up_blocks[res], "attentions"
+            ):
+                continue
+
             module = (
                 model.unet.up_blocks[res].attentions[block].transformer_blocks[0].attn1
             )
             setattr(module, "t", t)
     for res in down_res_dict:
         for block in down_res_dict[res]:
+            if res >= len(model.unet.down_blocks) or not hasattr(
+                model.unet.down_blocks[res], "attentions"
+            ):
+                continue
+
             module = (
                 model.unet.down_blocks[res]
                 .attentions[block]
@@ -353,9 +363,11 @@ def register_attention_control_efficient(model, injection_schedule):
 
     for res in res_dict:
         for block in res_dict[res]:
-            print("📦 res:", res)
-            print("📦 block:", block)
-            print("📦 up_blocks:", model.unet.up_blocks[res])
+            if res >= len(model.unet.up_blocks) or not hasattr(
+                model.unet.up_blocks[res], "attentions"
+            ):
+                continue
+
             module = (
                 model.unet.up_blocks[res].attentions[block].transformer_blocks[0].attn1
             )
@@ -469,7 +481,7 @@ class PNP(nn.Module):
         )
         self.timesteps_to_save = timesteps_to_save
         self.num_inference_steps = num_inference_steps
-        self.model = Preprocess(
+        self.preprocessor = Preprocess(
             self.device, model_key=model_key, num_ddim_steps=num_ddim_steps
         )
 
@@ -508,35 +520,67 @@ class PNP(nn.Module):
     def get_text_embeds(self, prompt, negative_prompt, batch_size=1):
         print("✅ get_text_embeds")
         # Tokenize text and get embeddings
-        text_input = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        text_embeddings = self.text_encoder(text_input.input_ids.to(self.device))[0]
 
-        # Do the same for unconditional embeddings
-        uncond_input = self.tokenizer(
-            negative_prompt,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            return_tensors="pt",
+        compel = Compel(
+            tokenizer=[
+                self.preprocessor.model.tokenizer,
+                self.preprocessor.model.tokenizer_2,
+            ],
+            text_encoder=[
+                self.preprocessor.model.text_encoder,
+                self.preprocessor.model.text_encoder_2,
+            ],
+            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+            requires_pooled=[False, True],
         )
 
-        uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(self.device))[0]
+        prompt_embeds, pooled_prompt_embeds = compel(prompt)
+        negative_prompt_embeds, negative_pooled_prompt_embeds = compel(negative_prompt)
 
-        # Cat for final embeddings
-        text_embeddings = torch.cat(
-            [uncond_embeddings] * batch_size + [text_embeddings] * batch_size
+        vae_scale_factor = 2 ** (
+            len(self.preprocessor.model.vae.config.block_out_channels) - 1
         )
-        return text_embeddings
+        default_sample_size = self.preprocessor.model.unet.config.sample_size
+
+        height = default_sample_size * vae_scale_factor
+        width = default_sample_size * vae_scale_factor
+
+        original_size = (height, width)
+        target_size = (height, width)
+        crops_coords_top_left = (0, 0)
+        add_time_ids = list(original_size + crops_coords_top_left + target_size)
+
+        passed_add_embed_dim = (
+            self.preprocessor.model.unet.config.addition_time_embed_dim
+            * len(add_time_ids)
+            + self.preprocessor.model.text_encoder_2.config.projection_dim
+        )
+        expected_add_embed_dim = (
+            self.preprocessor.model.unet.add_embedding.linear_1.in_features
+        )
+
+        if expected_add_embed_dim != passed_add_embed_dim:
+            raise ValueError(
+                f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
+            )
+
+        add_time_ids = torch.tensor(
+            [add_time_ids], dtype=self.preprocessor.model.unet.dtype
+        ).to(self.device)
+        batch_size = prompt_embeds.shape[0]
+        add_time_ids = add_time_ids.repeat(batch_size, 1)
+
+        context = torch.cat([negative_prompt_embeds, prompt_embeds])
+        context_p = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds])
+
+        add_time_ids = torch.cat([add_time_ids, add_time_ids])
+
+        return context, context_p, add_time_ids
 
     @torch.no_grad()
     def decode_latent(self, latent):
         with torch.autocast(device_type="cuda", dtype=torch.float32):
-            latent = 1 / 0.18215 * latent
+            latent = 1 / 0.13025 * latent
             img = self.vae.decode(latent).sample
             img = (img / 2 + 0.5).clamp(0, 1)
         return img
@@ -563,14 +607,41 @@ class PNP(nn.Module):
             text_embed_input = torch.cat(
                 [self.pnp_guidance_embeds[i], self.text_embeds], dim=0
             )
+            text_embed_input_p = torch.cat(
+                [self.pnp_guidance_embeds_p[i], self.text_embeds_p], dim=0
+            )
+            add_time_ids_input = torch.cat(
+                [self.pnp_guidance_time_ids[i], self.add_time_ids], dim=0
+            )
         else:
             text_embed_input = torch.cat(
                 [self.pnp_guidance_embeds, self.text_embeds], dim=0
             )
+            text_embed_input_p = torch.cat(
+                [self.pnp_guidance_embeds_p, self.text_embeds_p], dim=0
+            )
+            add_time_ids_input = torch.cat(
+                [self.pnp_guidance_time_ids, self.add_time_ids], dim=0
+            )
+
+        print("📦 pnp_guidance_embeds =", self.pnp_guidance_embeds.shape)
+        print("📦 text_embeds =", self.text_embeds.shape)
+        print("📦 text_embed_input =", text_embed_input.shape)
+        print("📦 pnp_guidance_embeds_p =", self.pnp_guidance_embeds_p.shape)
+        print("📦 text_embeds_p =", self.text_embeds_p.shape)
+        print("📦 text_embed_input_p =", text_embed_input_p.shape)
+        print("📦 add_time_ids_input =", add_time_ids_input.shape)
 
         # apply the denoising network
+        added_cond_kwargs = {
+            "text_embeds": text_embed_input_p,
+            "time_ids": add_time_ids_input,
+        }
         noise_pred = self.unet(
-            latent_model_input, t, encoder_hidden_states=text_embed_input
+            latent_model_input,
+            t,
+            encoder_hidden_states=text_embed_input,
+            added_cond_kwargs=added_cond_kwargs,
         )["sample"]
 
         # perform guidance
@@ -602,6 +673,7 @@ class PNP(nn.Module):
         target_prompt,
         guidance_scale=7.5,
         uncond_embeddings=None,
+        uncond_embeddings_p=None,
         pnp_f_t=0.8,
         pnp_attn_t=0.5,
     ):
@@ -610,13 +682,19 @@ class PNP(nn.Module):
         self.image = self.get_data(image_path)
         self.eps = noisy_latent[-1]
 
-        self.text_embeds = self.get_text_embeds(
+        self.text_embeds, self.text_embeds_p, self.add_time_ids = self.get_text_embeds(
             target_prompt, "ugly, blurry, black, low res, unrealistic"
         )
+
         if uncond_embeddings is None:
-            self.pnp_guidance_embeds = self.get_text_embeds("", "").chunk(2)[0]
+            embeds, embeds_p, _ = self.get_text_embeds("", "")
+            self.pnp_guidance_embeds = embeds.chunk(2)[0]
+            self.pnp_guidance_embeds_p = embeds_p.chunk(2)[0]
+            self.pnp_guidance_time_ids = self.add_time_ids.chunk(2)[0]
         else:
             self.pnp_guidance_embeds = uncond_embeddings
+            self.pnp_guidance_embeds_p = uncond_embeddings_p
+            self.pnp_guidance_time_ids = self.add_time_ids.chunk(2)[0]
 
         pnp_f_t = int(self.num_ddim_steps * pnp_f_t)
         pnp_attn_t = int(self.num_ddim_steps * pnp_attn_t)
@@ -651,11 +729,13 @@ class PNP(nn.Module):
     ):
         torch.cuda.empty_cache()
         image_gt = load_512(image_path)
-        _, rgb_reconstruction, latent_reconstruction = self.model.extract_latents(
-            data_path=image_path,
-            num_steps=self.num_ddim_steps,
-            inversion_prompt=prompt_src,
-            guidance_scale=guidance_scale,
+        _, rgb_reconstruction, latent_reconstruction = (
+            self.preprocessor.extract_latents(
+                data_path=image_path,
+                num_steps=self.num_ddim_steps,
+                inversion_prompt=prompt_src,
+                guidance_scale=guidance_scale,
+            )
         )
 
         edited_image = self.run_pnp(
@@ -695,7 +775,7 @@ class PNP(nn.Module):
     ):
         torch.cuda.empty_cache()
         image_gt = load_512(image_path)
-        inverted_x, _, __ = self.model.extract_latents(
+        inverted_x, _, __ = self.preprocessor.extract_latents(
             data_path=image_path,
             num_steps=self.num_ddim_steps,
             inversion_prompt=prompt_src,
@@ -739,7 +819,7 @@ class PNP(nn.Module):
         image_gt = load_512(image_path)
 
         null_inversion = NullInversion(
-            model=self.model, num_ddim_steps=self.num_ddim_steps
+            model=self.preprocessor.model, num_ddim_steps=self.num_ddim_steps
         )
 
         _, _, inverted_x, uncond_embeddings = null_inversion.invert(
@@ -786,7 +866,7 @@ class PNP(nn.Module):
         image_gt = load_512(image_path)
 
         negative_inversion = NegativePromptInversion(
-            model=self.model, num_ddim_steps=self.num_ddim_steps
+            model=self.preprocessor.model, num_ddim_steps=self.num_ddim_steps
         )
 
         _, _, inverted_x, uncond_embeddings = negative_inversion.invert(

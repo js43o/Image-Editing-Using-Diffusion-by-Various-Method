@@ -709,7 +709,7 @@ class MasaCtrlEditor:
             model=self.model, num_ddim_steps=self.num_ddim_steps
         )
 
-        _, _, x_stars, uncond_embeddings = null_inversion.invert(
+        _, _, x_stars, uncond_embeddings, uncond_embeddings_p = null_inversion.invert(
             image_gt=image_gt, prompt=prompt_src, guidance_scale=guidance_scale
         )
         x_t = x_stars[-1]
@@ -724,6 +724,7 @@ class MasaCtrlEditor:
             latents=x_t,
             num_inference_steps=self.num_ddim_steps,
             guidance_scale=guidance_scale,
+            unconditioning=uncond_embeddings,
             unconditioning=uncond_embeddings,
         )
 

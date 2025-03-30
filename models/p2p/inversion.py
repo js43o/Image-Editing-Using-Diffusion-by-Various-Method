@@ -265,7 +265,7 @@ class NullInversion:
                     add_time_ids=add_time_ids,
                 )
 
-        return uncond_embeddings_list
+        return uncond_embeddings_list, uncond_embeddings_p_list
 
     def invert(
         self,
@@ -281,10 +281,10 @@ class NullInversion:
 
         image_rec, ddim_latents = self.ddim_inversion(image_gt)
 
-        uncond_embeddings = self.null_optimization(
+        uncond_embeddings, uncond_embeddings_p = self.null_optimization(
             ddim_latents, num_inner_steps, early_stop_epsilon, guidance_scale
         )
-        return image_gt, image_rec, ddim_latents, uncond_embeddings
+        return image_gt, image_rec, ddim_latents, uncond_embeddings, uncond_embeddings_p
 
     def __init__(self, model, num_ddim_steps):
         self.model = model
