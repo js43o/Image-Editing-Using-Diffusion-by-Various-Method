@@ -275,6 +275,7 @@ class NullInversion:
         num_inner_steps=10,
         early_stop_epsilon=1e-5,
     ):
+        print("➡️ invert()")
         self.init_prompt(prompt)
         register_attention_control(self.model, None)
 

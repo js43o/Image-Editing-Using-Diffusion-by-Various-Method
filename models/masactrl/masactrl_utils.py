@@ -95,6 +95,9 @@ def register_attention_editor_diffusers(model, editor: AttentionBase):
             The attention is similar to the original implementation of LDM CrossAttention class
             except adding some modifications on the attention
             """
+
+            residual = x  # residual save
+
             if encoder_hidden_states is not None:
                 context = encoder_hidden_states
             if attention_mask is not None:
@@ -112,20 +115,22 @@ def register_attention_editor_diffusers(model, editor: AttentionBase):
             context = context if is_cross else x
             k = self.to_k(context)
             v = self.to_v(context)
+
             q, k, v = map(
                 lambda t: rearrange(t, "b n (h d) -> (b h) n d", h=h), (q, k, v)
-            )
+            )  # masactrl
 
             sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
 
             if mask is not None:
-                mask = rearrange(mask, "b ... -> b (...)")
+                mask = rearrange(mask, "b ... -> b (...)")  # masactrl
                 max_neg_value = -torch.finfo(sim.dtype).max
-                mask = repeat(mask, "b j -> (b h) () j", h=h)
+                mask = repeat(mask, "b j -> (b h) () j", h=h)  # masactrl
                 mask = mask[:, None, :].repeat(h, 1, 1)
                 sim.masked_fill_(~mask, max_neg_value)
 
             attn = sim.softmax(dim=-1)
+
             # the only difference
             out = editor(
                 q,
@@ -139,7 +144,29 @@ def register_attention_editor_diffusers(model, editor: AttentionBase):
                 scale=self.scale,
             )
 
-            return to_out(out)
+            out = to_out(out)
+
+            """ RLI """
+
+            alpha = 0.2
+            is_complexity = False
+
+            print("🌊 RLI 적용됨! alpha =", alpha)
+
+            if self.to_k.in_features != self.to_q.in_features:
+                # cross-attention
+                if place_in_unet == "down" or place_in_unet == "mid":
+                    out = (1 - alpha) * out + residual * (alpha)
+            else:
+                # self-attention
+                if (
+                    place_in_unet == "down"
+                    or place_in_unet == "mid"
+                    or (is_complexity and self.to_q.in_features == 640)
+                ):
+                    out = (1 - alpha) * out + residual * (alpha)
+
+            return out
 
         return forward
 
@@ -160,85 +187,4 @@ def register_attention_editor_diffusers(model, editor: AttentionBase):
             cross_att_count += register_editor(net, 0, "mid")
         elif "up" in net_name:
             cross_att_count += register_editor(net, 0, "up")
-    editor.num_att_layers = cross_att_count
-
-
-def regiter_attention_editor_ldm(model, editor: AttentionBase):
-    """
-    Register a attention editor to Stable Diffusion model, refer from [Prompt-to-Prompt]
-    """
-
-    def ca_forward(self, place_in_unet):
-        def forward(
-            x, encoder_hidden_states=None, attention_mask=None, context=None, mask=None
-        ):
-            """
-            The attention is similar to the original implementation of LDM CrossAttention class
-            except adding some modifications on the attention
-            """
-            if encoder_hidden_states is not None:
-                context = encoder_hidden_states
-            if attention_mask is not None:
-                mask = attention_mask
-
-            to_out = self.to_out
-            if isinstance(to_out, nn.modules.container.ModuleList):
-                to_out = self.to_out[0]
-            else:
-                to_out = self.to_out
-
-            h = self.heads
-            q = self.to_q(x)
-            is_cross = context is not None
-            context = context if is_cross else x
-            k = self.to_k(context)
-            v = self.to_v(context)
-            q, k, v = map(
-                lambda t: rearrange(t, "b n (h d) -> (b h) n d", h=h), (q, k, v)
-            )
-
-            sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
-
-            if mask is not None:
-                mask = rearrange(mask, "b ... -> b (...)")
-                max_neg_value = -torch.finfo(sim.dtype).max
-                mask = repeat(mask, "b j -> (b h) () j", h=h)
-                mask = mask[:, None, :].repeat(h, 1, 1)
-                sim.masked_fill_(~mask, max_neg_value)
-
-            attn = sim.softmax(dim=-1)
-            # the only difference
-            out = editor(
-                q,
-                k,
-                v,
-                sim,
-                attn,
-                is_cross,
-                place_in_unet,
-                self.heads,
-                scale=self.scale,
-            )
-
-            return to_out(out)
-
-        return forward
-
-    def register_editor(net, count, place_in_unet):
-        for name, subnet in net.named_children():
-            if net.__class__.__name__ == "CrossAttention":  # spatial Transformer layer
-                net.forward = ca_forward(net, place_in_unet)
-                return count + 1
-            elif hasattr(net, "children"):
-                count = register_editor(subnet, count, place_in_unet)
-        return count
-
-    cross_att_count = 0
-    for net_name, net in model.model.diffusion_model.named_children():
-        if "input" in net_name:
-            cross_att_count += register_editor(net, 0, "input")
-        elif "middle" in net_name:
-            cross_att_count += register_editor(net, 0, "middle")
-        elif "output" in net_name:
-            cross_att_count += register_editor(net, 0, "output")
     editor.num_att_layers = cross_att_count

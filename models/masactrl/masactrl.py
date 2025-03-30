@@ -699,6 +699,7 @@ class MasaCtrlEditor:
     def edit_image_null_text_inversion_MasaCtrl(
         self, image_path, prompt_src, prompt_tar, guidance_scale, step=4, layper=10
     ):
+        print("➡️ edit_image_null_text_inversion_MasaCtrl()")
         source_image = load_image(image_path, self.device)
         image_gt = load_512(image_path)
 
@@ -715,7 +716,9 @@ class MasaCtrlEditor:
 
         # results of direct synthesis
         editor = AttentionBase()
+
         register_attention_editor_diffusers(self.model, editor)
+
         image_fixed = self.model(
             [prompt_tar],
             latents=x_t,
@@ -726,6 +729,7 @@ class MasaCtrlEditor:
 
         # hijack the attention module
         editor = MutualSelfAttentionControl(step, layper)
+
         register_attention_editor_diffusers(self.model, editor)
 
         # inference the synthesized image
@@ -791,7 +795,7 @@ class MasaCtrlEditor:
 
         # results of direct synthesis
         editor = AttentionBase()
-        # register_attention_editor_diffusers(self.model, editor)
+        register_attention_editor_diffusers(self.model, editor)
         # image_fixed = self.model([prompt_tar],
         #                     latents=x_t,
         #                     num_inference_steps=self.num_ddim_steps,
@@ -821,7 +825,7 @@ class MasaCtrlEditor:
         )[0]
         # hijack the attention module
         editor = MutualSelfAttentionControl(step, layper)
-        # register_attention_editor_diffusers(self.model, editor)
+        register_attention_editor_diffusers(self.model, editor)
 
         # inference the synthesized image
         # image_masactrl = self.model(prompts,
@@ -885,7 +889,9 @@ class MasaCtrlEditor:
 
         # results of direct synthesis
         editor = AttentionBase()
+
         register_attention_editor_diffusers(self.model, editor)
+
         image_fixed = self.model(
             [prompt_tar],
             latents=x_t,
@@ -896,6 +902,7 @@ class MasaCtrlEditor:
 
         # hijack the attention module
         editor = MutualSelfAttentionControl(step, layper)
+
         register_attention_editor_diffusers(self.model, editor)
 
         # inference the synthesized image
@@ -945,6 +952,7 @@ class MasaCtrlEditor:
 
         # results of direct synthesis
         editor = AttentionBase()
+
         register_attention_editor_diffusers(self.model, editor)
         image_fixed = self.model(
             [prompt_tar],
@@ -955,6 +963,7 @@ class MasaCtrlEditor:
 
         # hijack the attention module
         editor = MutualSelfAttentionControl(step, layper)
+
         register_attention_editor_diffusers(self.model, editor)
 
         # inference the synthesized image
