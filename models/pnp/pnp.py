@@ -3,7 +3,7 @@ from diffusers import (
     AutoencoderKL,
     UNet2DConditionModel,
     DDIMScheduler,
-    StableDiffusionPipeline,
+    StableDiffusionXLPipeline,
 )
 import numpy as np
 from PIL import Image
@@ -14,6 +14,7 @@ from models.p2p.inversion import (
     NullInversion,
 )  # , NegativePromptInversion
 import torchvision.transforms as T
+from compel import Compel, ReturnedEmbeddingsType
 
 from utils.utils import txt_draw, load_512, latent2image
 
@@ -35,51 +36,77 @@ class Preprocess(nn.Module):
         self.device = device
         self.use_depth = False
 
-        print(f"[INFO] loading stable diffusion...")
         # Create model
-        self.vae = AutoencoderKL.from_pretrained(
-            model_key,
-            subfolder="vae",
-        ).to(self.device)
-        self.tokenizer = CLIPTokenizer.from_pretrained(model_key, subfolder="tokenizer")
-        self.text_encoder = CLIPTextModel.from_pretrained(
-            model_key,
-            subfolder="text_encoder",
-        ).to(self.device)
-        self.unet = UNet2DConditionModel.from_pretrained(
-            model_key,
-            subfolder="unet",
-        ).to(self.device)
-        self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler")
-        self.scheduler.set_timesteps(num_ddim_steps)
-        print(f"[INFO] loaded stable diffusion!")
+        print(f"[Preprocess] loading stable diffusion...")
+        self.scheduler = DDIMScheduler(
+            beta_start=0.00085,
+            beta_end=0.012,
+            beta_schedule="scaled_linear",
+            clip_sample=False,
+            set_alpha_to_one=False,
+        )
+        self.model = StableDiffusionXLPipeline.from_pretrained(
+            model_key, scheduler=self.scheduler, torch_dtype=torch.float16
+        ).to("cuda")
+        self.model.enable_xformers_memory_efficient_attention()
+        self.model.scheduler.set_timesteps(num_ddim_steps)
+
+        print(f"[Preprocess] loaded stable diffusion!")
 
     @torch.no_grad()
     def get_text_embeds(self, prompt, negative_prompt, device="cuda"):
-        print("✅ get_text_embeds()")
-        text_input = self.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
+        print("✅ get_text_embeds() - %s / %s" % (prompt, negative_prompt))
+
+        compel = Compel(
+            tokenizer=[self.model.tokenizer, self.model.tokenizer_2],
+            text_encoder=[self.model.text_encoder, self.model.text_encoder_2],
+            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+            requires_pooled=[False, True],
         )
-        text_embeddings = self.text_encoder(text_input.input_ids.to(device))[0]
-        uncond_input = self.tokenizer(
-            negative_prompt,
-            padding="max_length",
-            max_length=self.tokenizer.model_max_length,
-            return_tensors="pt",
+
+        prompt_embeds, pooled_prompt_embeds = compel(prompt)
+        negative_prompt_embeds, negative_pooled_prompt_embeds = compel(negative_prompt)
+
+        vae_scale_factor = 2 ** (len(self.model.vae.config.block_out_channels) - 1)
+        default_sample_size = self.model.unet.config.sample_size
+
+        height = default_sample_size * vae_scale_factor
+        width = default_sample_size * vae_scale_factor
+
+        original_size = (height, width)
+        target_size = (height, width)
+        crops_coords_top_left = (0, 0)
+        add_time_ids = list(original_size + crops_coords_top_left + target_size)
+
+        passed_add_embed_dim = (
+            self.model.unet.config.addition_time_embed_dim * len(add_time_ids)
+            + self.model.text_encoder_2.config.projection_dim
         )
-        uncond_embeddings = self.text_encoder(uncond_input.input_ids.to(device))[0]
-        text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
-        return text_embeddings
+        expected_add_embed_dim = self.model.unet.add_embedding.linear_1.in_features
+
+        if expected_add_embed_dim != passed_add_embed_dim:
+            raise ValueError(
+                f"Model expects an added time embedding vector of length {expected_add_embed_dim}, but a vector of {passed_add_embed_dim} was created. The model has an incorrect config. Please check `unet.config.time_embedding_type` and `text_encoder_2.config.projection_dim`."
+            )
+
+        add_time_ids = torch.tensor([add_time_ids], dtype=self.model.unet.dtype).to(
+            self.device
+        )
+        batch_size = prompt_embeds.shape[0]
+        add_time_ids = add_time_ids.repeat(batch_size, 1)
+
+        context = torch.cat([negative_prompt_embeds, prompt_embeds])
+        context_p = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds])
+
+        add_time_ids = torch.cat([add_time_ids, add_time_ids])
+
+        return context, context_p, add_time_ids
 
     @torch.no_grad()
     def decode_latents(self, latents):
         with torch.autocast(device_type="cuda", dtype=torch.float32):
             latents = 1 / 0.18215 * latents
-            imgs = self.vae.decode(latents).sample
+            imgs = self.model.vae.decode(latents).sample
             imgs = (imgs / 2 + 0.5).clamp(0, 1)
         return imgs
 
@@ -92,24 +119,27 @@ class Preprocess(nn.Module):
     def encode_imgs(self, imgs):
         with torch.autocast(device_type="cuda", dtype=torch.float32):
             imgs = 2 * imgs - 1
-            posterior = self.vae.encode(imgs).latent_dist
+            posterior = self.model.vae.encode(imgs).latent_dist
             latents = posterior.mean * 0.18215
         return latents
 
     @torch.no_grad()
-    def ddim_inversion(self, cond, latent):
+    def ddim_inversion(self, cond, cond_p, add_time, latent):
         print("✅ ddim_inversion()")
         latent_list = [latent]
-        timesteps = reversed(self.scheduler.timesteps)
+        timesteps = reversed(self.model.scheduler.timesteps)
         with torch.autocast(device_type="cuda", dtype=torch.float32):
             for i, t in enumerate(timesteps):
                 cond_batch = cond.repeat(latent.shape[0], 1, 1)
+                # 배치 처리 전/후 형상 변함 없음
+                # cond_p, add_time은 배치 생략
 
-                alpha_prod_t = self.scheduler.alphas_cumprod[t]
+                t = t.int().item()
+                alpha_prod_t = self.model.scheduler.alphas_cumprod[t]
                 alpha_prod_t_prev = (
-                    self.scheduler.alphas_cumprod[timesteps[i - 1]]
+                    self.model.scheduler.alphas_cumprod[timesteps[i - 1]]
                     if i > 0
-                    else self.scheduler.final_alpha_cumprod
+                    else self.model.scheduler.final_alpha_cumprod
                 )
 
                 mu = alpha_prod_t**0.5
@@ -117,7 +147,16 @@ class Preprocess(nn.Module):
                 sigma = (1 - alpha_prod_t) ** 0.5
                 sigma_prev = (1 - alpha_prod_t_prev) ** 0.5
 
-                eps = self.unet(latent, t, encoder_hidden_states=cond_batch).sample
+                added_cond_kwargs = {
+                    "text_embeds": cond_p,
+                    "time_ids": add_time,
+                }
+                eps = self.model.unet(
+                    latent,
+                    t,
+                    encoder_hidden_states=cond_batch,
+                    added_cond_kwargs=added_cond_kwargs,
+                ).sample
 
                 pred_x0 = (latent - sigma_prev * eps) / mu_prev
                 latent = mu * pred_x0 + sigma * eps
@@ -125,25 +164,35 @@ class Preprocess(nn.Module):
         return latent_list
 
     @torch.no_grad()
-    def ddim_sample(self, x, cond):
+    def ddim_sample(self, x, cond, cond_p, add_time):
         print("✅ ddim_sample()")
-        timesteps = self.scheduler.timesteps
+        timesteps = self.model.scheduler.timesteps
         latent_list = []
         with torch.autocast(device_type="cuda", dtype=torch.float32):
             for i, t in enumerate(timesteps):
                 cond_batch = cond.repeat(x.shape[0], 1, 1)
-                alpha_prod_t = self.scheduler.alphas_cumprod[t]
+
+                alpha_prod_t = self.model.scheduler.alphas_cumprod[t]
                 alpha_prod_t_prev = (
-                    self.scheduler.alphas_cumprod[timesteps[i + 1]]
+                    self.model.scheduler.alphas_cumprod[timesteps[i + 1]]
                     if i < len(timesteps) - 1
-                    else self.scheduler.final_alpha_cumprod
+                    else self.model.scheduler.final_alpha_cumprod
                 )
                 mu = alpha_prod_t**0.5
                 sigma = (1 - alpha_prod_t) ** 0.5
                 mu_prev = alpha_prod_t_prev**0.5
                 sigma_prev = (1 - alpha_prod_t_prev) ** 0.5
 
-                eps = self.unet(x, t, encoder_hidden_states=cond_batch).sample
+                added_cond_kwargs = {
+                    "text_embeds": cond_p,
+                    "time_ids": add_time,
+                }
+                eps = self.model.unet(
+                    x,
+                    t,
+                    encoder_hidden_states=cond_batch,
+                    added_cond_kwargs=added_cond_kwargs,
+                ).sample
 
                 pred_x0 = (x - sigma * eps) / mu
                 x = mu_prev * pred_x0 + sigma_prev * eps
@@ -153,14 +202,14 @@ class Preprocess(nn.Module):
     def prev_step(self, model_output, timestep: int, sample):
         prev_timestep = (
             timestep
-            - self.scheduler.config.num_train_timesteps
-            // self.scheduler.num_inference_steps
+            - self.model.scheduler.config.num_train_timesteps
+            // self.model.scheduler.num_inference_steps
         )
-        alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
+        alpha_prod_t = self.model.scheduler.alphas_cumprod[timestep]
         alpha_prod_t_prev = (
-            self.scheduler.alphas_cumprod[prev_timestep]
+            self.model.scheduler.alphas_cumprod[prev_timestep]
             if prev_timestep >= 0
-            else self.scheduler.final_alpha_cumprod
+            else self.model.scheduler.final_alpha_cumprod
         )
         beta_prod_t = 1 - alpha_prod_t
         pred_original_sample = (
@@ -184,7 +233,7 @@ class Preprocess(nn.Module):
         print("✅ get_noise_pred_single()")
         # print("latent shape",latents.shape)
         # print("context shape",context.shape)
-        noise_pred = self.unet(latents, t, encoder_hidden_states=context).sample
+        noise_pred = self.model.unet(latents, t, encoder_hidden_states=context).sample
         return noise_pred
 
     @torch.no_grad()
@@ -192,16 +241,21 @@ class Preprocess(nn.Module):
         self, num_steps, data_path, inversion_prompt="", guidance_scale=7.5
     ):
         print("✅ extract_latents()")
-        self.scheduler.set_timesteps(num_steps)
+        self.model.scheduler.set_timesteps(num_steps)
 
-        cond_ = self.get_text_embeds(inversion_prompt, "")
-        cond = self.get_text_embeds(inversion_prompt, "")[1].unsqueeze(0)
+        cond, cond_p, add_time = self.get_text_embeds(inversion_prompt, "")
+        cond = cond[1].unsqueeze(0)
+        cond_p = cond_p[1].unsqueeze(0)
+        add_time = add_time[1].unsqueeze(0)
+
         image = self.load_img(data_path)
         latent = self.encode_imgs(image)
 
-        inverted_x = self.ddim_inversion(cond, latent)  # X0, X1, ..., XT
+        inverted_x = self.ddim_inversion(
+            cond, cond_p, add_time, latent
+        )  # X0, X1, ..., XT
         latent_reconstruction = self.ddim_sample(
-            inverted_x[-1], cond
+            inverted_x[-1], cond, cond_p, add_time
         )  # XT', XT-1', ..., X0'
         rgb_reconstruction = self.decode_latents(latent_reconstruction[-1])
         latent_reconstruction.reverse()  # X0', X1', ..., XT'
@@ -296,8 +350,12 @@ def register_attention_control_efficient(model, injection_schedule):
         2: [0, 1, 2],
         3: [0, 1, 2],
     }  # we are injecting attention in blocks 4 - 11 of the decoder, so not in the first block of the lowest resolution
+
     for res in res_dict:
         for block in res_dict[res]:
+            print("📦 res:", res)
+            print("📦 block:", block)
+            print("📦 up_blocks:", model.unet.up_blocks[res])
             module = (
                 model.unet.up_blocks[res].attentions[block].transformer_blocks[0].attn1
             )
@@ -374,13 +432,19 @@ class PNP(nn.Module):
     def __init__(self, num_ddim_steps=50, device="cuda"):
         super().__init__()
         self.device = device
-        model_key = "runwayml/stable-diffusion-v1-5"
+        model_key = "stabilityai/stable-diffusion-xl-base-1.0"
 
         # Create SD models
         print("Loading SD model")
-
-        pipe = StableDiffusionPipeline.from_pretrained(
-            model_key, torch_dtype=torch.float16
+        self.scheduler = DDIMScheduler(
+            beta_start=0.00085,
+            beta_end=0.012,
+            beta_schedule="scaled_linear",
+            clip_sample=False,
+            set_alpha_to_one=False,
+        )
+        pipe = StableDiffusionXLPipeline.from_pretrained(
+            model_key, scheduler=self.scheduler, torch_dtype=torch.float16
         ).to("cuda")
         pipe.enable_xformers_memory_efficient_attention()
 
