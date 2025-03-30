@@ -181,7 +181,7 @@ class NullInversion:
             ]
             noise_pred = self.get_noise_pred_single(
                 latent, t, cond_embeddings, cond_embeddings_p, add_time_ids2
-            )  # [[0]] ?
+            )
             latent = self.next_step(noise_pred, t, latent)
             all_latent.append(latent)
         return all_latent

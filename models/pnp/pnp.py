@@ -46,7 +46,7 @@ class Preprocess(nn.Module):
             set_alpha_to_one=False,
         )
         self.model = StableDiffusionXLPipeline.from_pretrained(
-            model_key, scheduler=self.scheduler, torch_dtype=torch.float16
+            model_key, scheduler=self.scheduler
         ).to("cuda")
         self.model.enable_xformers_memory_efficient_attention()
         self.model.scheduler.set_timesteps(num_ddim_steps)
@@ -456,7 +456,7 @@ class PNP(nn.Module):
             set_alpha_to_one=False,
         )
         pipe = StableDiffusionXLPipeline.from_pretrained(
-            model_key, scheduler=self.scheduler, torch_dtype=torch.float16
+            model_key, scheduler=self.scheduler
         ).to("cuda")
         pipe.enable_xformers_memory_efficient_attention()
 
@@ -604,14 +604,23 @@ class PNP(nn.Module):
 
         # compute text embeddings
         if null_or_negative:
+            print("🌊 NULL-TEXT INVERSION")
             text_embed_input = torch.cat(
-                [self.pnp_guidance_embeds[i], self.text_embeds], dim=0
+                [
+                    self.pnp_guidance_embeds[i].expand(*self.text_embeds.shape),
+                    self.text_embeds.chunk(2)[1],
+                ],
+                dim=0,
             )
             text_embed_input_p = torch.cat(
-                [self.pnp_guidance_embeds_p[i], self.text_embeds_p], dim=0
+                [
+                    self.pnp_guidance_embeds_p[i].expand(*self.text_embeds_p.shape),
+                    self.text_embeds_p.chunk(2)[1],
+                ],
+                dim=0,
             )
             add_time_ids_input = torch.cat(
-                [self.pnp_guidance_time_ids[i], self.add_time_ids], dim=0
+                [self.pnp_guidance_time_ids, self.add_time_ids], dim=0
             )
         else:
             text_embed_input = torch.cat(
@@ -624,11 +633,11 @@ class PNP(nn.Module):
                 [self.pnp_guidance_time_ids, self.add_time_ids], dim=0
             )
 
-        print("📦 pnp_guidance_embeds =", self.pnp_guidance_embeds.shape)
-        print("📦 text_embeds =", self.text_embeds.shape)
+        print("📦 self.pnp_guidance_time_ids =", self.pnp_guidance_time_ids.shape)
+        print("📦 self.add_time_ids =", self.add_time_ids.shape)
+
+        print("📦 latent_model_input =", latent_model_input.shape)
         print("📦 text_embed_input =", text_embed_input.shape)
-        print("📦 pnp_guidance_embeds_p =", self.pnp_guidance_embeds_p.shape)
-        print("📦 text_embeds_p =", self.text_embeds_p.shape)
         print("📦 text_embed_input_p =", text_embed_input_p.shape)
         print("📦 add_time_ids_input =", add_time_ids_input.shape)
 
@@ -643,6 +652,8 @@ class PNP(nn.Module):
             encoder_hidden_states=text_embed_input,
             added_cond_kwargs=added_cond_kwargs,
         )["sample"]
+
+        print("📦 noise_pred =", noise_pred.shape)
 
         # perform guidance
         _, noise_pred_uncond, noise_pred_cond = noise_pred.chunk(3)
@@ -686,15 +697,20 @@ class PNP(nn.Module):
             target_prompt, "ugly, blurry, black, low res, unrealistic"
         )
 
+        embeds, embeds_p, add_time_ids = self.get_text_embeds("", "")
         if uncond_embeddings is None:
-            embeds, embeds_p, _ = self.get_text_embeds("", "")
             self.pnp_guidance_embeds = embeds.chunk(2)[0]
             self.pnp_guidance_embeds_p = embeds_p.chunk(2)[0]
-            self.pnp_guidance_time_ids = self.add_time_ids.chunk(2)[0]
+            self.pnp_guidance_time_ids = add_time_ids.chunk(2)[0]
         else:
+            print(
+                "🌊 UNCOND_EMBEDDING: ",
+                len(uncond_embeddings),
+                len(uncond_embeddings_p),
+            )
             self.pnp_guidance_embeds = uncond_embeddings
             self.pnp_guidance_embeds_p = uncond_embeddings_p
-            self.pnp_guidance_time_ids = self.add_time_ids.chunk(2)[0]
+            self.pnp_guidance_time_ids = add_time_ids.chunk(2)[0]
 
         pnp_f_t = int(self.num_ddim_steps * pnp_f_t)
         pnp_attn_t = int(self.num_ddim_steps * pnp_attn_t)
@@ -822,12 +838,19 @@ class PNP(nn.Module):
             model=self.preprocessor.model, num_ddim_steps=self.num_ddim_steps
         )
 
-        _, _, inverted_x, uncond_embeddings = null_inversion.invert(
-            image_gt=image_gt, prompt=prompt_src, guidance_scale=guidance_scale
+        _, _, inverted_x, uncond_embeddings, uncond_embeddings_p = (
+            null_inversion.invert(
+                image_gt=image_gt, prompt=prompt_src, guidance_scale=guidance_scale
+            )
         )
 
         edited_image = self.run_pnp(
-            image_path, inverted_x, prompt_tar, guidance_scale, uncond_embeddings
+            image_path,
+            inverted_x,
+            prompt_tar,
+            guidance_scale,
+            uncond_embeddings,
+            uncond_embeddings_p,
         )
 
         image_instruct = txt_draw(
@@ -869,12 +892,17 @@ class PNP(nn.Module):
             model=self.preprocessor.model, num_ddim_steps=self.num_ddim_steps
         )
 
-        _, _, inverted_x, uncond_embeddings = negative_inversion.invert(
-            image_gt=image_gt, prompt=prompt_src
+        _, _, inverted_x, uncond_embeddings, uncond_embeddings_p = (
+            negative_inversion.invert(image_gt=image_gt, prompt=prompt_src)
         )
 
         edited_image = self.run_pnp(
-            image_path, inverted_x, prompt_tar, guidance_scale, uncond_embeddings
+            image_path,
+            inverted_x,
+            prompt_tar,
+            guidance_scale,
+            uncond_embeddings,
+            uncond_embeddings_p,
         )
 
         image_instruct = txt_draw(

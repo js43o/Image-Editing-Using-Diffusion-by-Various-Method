@@ -82,13 +82,18 @@ if __name__ == "__main__":
     #     if item["editing_type_id"] not in edit_category_list:
     #         continue
 
-    original_prompt = "A stone on the sand"  # item["original_prompt"].replace("[", "").replace("]", "")
-    editing_prompt = "A sharp stone on the sand"  # item["editing_prompt"].replace("[", "").replace("]", "")
-    image_path = "./img/stone.png"  # os.path.join(f"{data_path}/annotation_images", item["image_path"])
+    original_prompt = (
+        "A smiling girl"  # item["original_prompt"].replace("[", "").replace("]", "")
+    )
+    editing_prompt = (
+        "A angry girl"  # item["editing_prompt"].replace("[", "").replace("]", "")
+    )
+    image_path = "./img/girl.png"  # os.path.join(f"{data_path}/annotation_images", item["image_path"])
     editing_instruction = ""  # item["editing_instruction"]
-    blended_word = (
-        []
-    )  # item["blended_word"].split(" ") if item["blended_word"] != "" else []
+    blended_word = [
+        "smiling",
+        "angry",
+    ]  # item["blended_word"].split(" ") if item["blended_word"] != "" else []
     # mask = Image.fromarray(np.uint8(mask_decode(item["mask"])[:,:,np.newaxis].repeat(3,2))).convert("L")
     mask = Image.fromarray(
         np.uint8(
@@ -185,7 +190,7 @@ if __name__ == "__main__":
                 from models.pnp.pnp import PNP as PNPEditor
 
                 pnp_editor = PNPEditor(
-                    50,
+                    10,
                     (
                         torch.device("cuda")
                         if torch.cuda.is_available()
